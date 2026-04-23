@@ -194,9 +194,16 @@ class PolicySyncDualArmExecutor:
         self._pool = ThreadPoolExecutor(max_workers=2) if parallel_dispatch else None
 
     def send_action(self, action: RobotAction) -> RobotAction:
-        if self._pool is None:
+        uses_custom_feedback = (
+            type(self.robot).get_feedback_action_for_teleop is not Robot.get_feedback_action_for_teleop
+        )
+        if uses_custom_feedback or self._pool is None:
             sent_action = self.robot.send_action(action)
-            self.teleop.send_feedback(action)
+            feedback_action = self.robot.get_feedback_action_for_teleop(
+                requested_action=action,
+                sent_action=sent_action,
+            )
+            self.teleop.send_feedback(feedback_action)
             return sent_action
 
         robot_future = self._pool.submit(self.robot.send_action, action)

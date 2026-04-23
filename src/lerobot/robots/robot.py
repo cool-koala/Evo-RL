@@ -182,6 +182,32 @@ class Robot(abc.ABC):
         """Optionally let robots skip observation-side work during pure teleoperation send loops."""
         del enabled
 
+    def normalize_action_for_storage(
+        self,
+        action: RobotAction,
+        *,
+        source: str | None = None,
+        sent_action: RobotAction | None = None,
+    ) -> RobotAction:
+        """Optionally coerce an action into the robot's dataset action space."""
+        del source, sent_action
+        return action
+
+    def get_feedback_action_for_teleop(
+        self,
+        *,
+        requested_action: RobotAction | None = None,
+        sent_action: RobotAction | None = None,
+    ) -> RobotAction:
+        """Optionally expose the follower-side action that should be mirrored on the teleoperator."""
+        if sent_action is not None:
+            return sent_action
+        return {} if requested_action is None else requested_action
+
+    def set_indicator_state(self, state: str) -> None:
+        """Optionally update the robot-side status indicator."""
+        del state
+
     @abc.abstractmethod
     def get_observation(self) -> RobotObservation:
         """

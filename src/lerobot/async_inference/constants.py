@@ -30,6 +30,7 @@ SUPPORTED_ROBOTS = [
     "so100_follower",
     "so101_follower",
     "bi_so_follower",
+    "dobot_xtrainer_follower",
     "piper_follower",
     "piperx_follower",
     "bi_piper_follower",

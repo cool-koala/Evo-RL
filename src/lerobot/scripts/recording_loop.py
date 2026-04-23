@@ -178,9 +178,19 @@ def record_loop(
         except Exception:
             logging.exception("Failed to switch teleop manual-control mode to %s", enabled)
 
+    def set_robot_indicator(state: str) -> None:
+        if not hasattr(robot, "set_indicator_state"):
+            return
+        try:
+            robot.set_indicator_state(state)
+        except Exception:
+            logging.exception("Failed to switch robot indicator state to %s", state)
+
     if policy is None:
         # During reset/teleop-only loops keep leader backdrivable for manual dragging.
         set_teleop_manual_control(True)
+        if teleop is not None:
+            set_robot_indicator("green")
 
     # Reset policy and processor if they are provided
     if policy is not None and preprocessor is not None and postprocessor is not None:
@@ -197,6 +207,7 @@ def record_loop(
     if intervention_enabled:
         # Start in S0: policy drives both arms, teleop arm should accept feedback commands.
         set_teleop_manual_control(False)
+        set_robot_indicator("yellow")
 
     def run_with_connection_retry(action_name: str, fn: Callable[[], T]) -> T:
         timeout_s = max(communication_retry_timeout_s, 0.0)
@@ -243,6 +254,29 @@ def record_loop(
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
+        if teleop_arm_for_mode_switch is not None and hasattr(teleop_arm_for_mode_switch, "poll_control_events"):
+            try:
+                teleop_events = teleop_arm_for_mode_switch.poll_control_events() or {}
+            except Exception:
+                logging.exception("Failed to poll teleoperator control events.")
+                teleop_events = {}
+
+            if teleop_events.get("indicator_state"):
+                set_robot_indicator(teleop_events["indicator_state"])
+
+            if teleop_events.get("sync_request") and hasattr(teleop_arm_for_mode_switch, "sync_to_robot"):
+                try:
+                    teleop_arm_for_mode_switch.sync_to_robot(robot)
+                except Exception:
+                    logging.exception("Failed to synchronize teleoperator to current robot pose.")
+                    set_robot_indicator("red")
+
+            for key in ("exit_early", "rerecord_episode", "stop_recording", "toggle_intervention"):
+                if teleop_events.get(key):
+                    events[key] = True
+            if teleop_events.get("episode_outcome") is not None:
+                events["episode_outcome"] = teleop_events["episode_outcome"]
+
         if events["exit_early"]:
             events["exit_early"] = False
             break
@@ -253,10 +287,12 @@ def record_loop(
                 if intervention_state == INTERVENTION_STATE_POLICY:
                     intervention_state = INTERVENTION_STATE_ACTIVE
                     set_teleop_manual_control(True)
+                    set_robot_indicator("green")
                     logging.info("Intervention enabled (S1): teleop actions now override policy execution.")
                 else:
                     intervention_state = INTERVENTION_STATE_RELEASE
                     set_teleop_manual_control(False)
+                    set_robot_indicator("yellow")
                     if policy is not None and preprocessor is not None and postprocessor is not None:
                         policy.reset()
                         preprocessor.reset()
@@ -385,9 +421,23 @@ def record_loop(
 
         # Write to dataset
         if dataset is not None:
-            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+            storage_action_values = action_values
+            storage_policy_action = policy_action_for_storage
+            if hasattr(robot, "normalize_action_for_storage"):
+                storage_action_values = robot.normalize_action_for_storage(
+                    action_values,
+                    source="policy" if selected_from_policy else "teleop",
+                    sent_action=_sent_action,
+                )
+                storage_policy_action = robot.normalize_action_for_storage(
+                    policy_action_for_storage,
+                    source="policy",
+                    sent_action=_sent_action,
+                )
+
+            action_frame = build_dataset_frame(dataset.features, storage_action_values, prefix=ACTION)
             policy_action_frame = build_dataset_frame(
-                dataset.features, policy_action_for_storage, prefix="complementary_info.policy_action"
+                dataset.features, storage_policy_action, prefix="complementary_info.policy_action"
             )
             frame = {**observation_frame, **action_frame, **policy_action_frame, "task": single_task}
 
@@ -407,7 +457,9 @@ def record_loop(
 
         if display_data:
             log_rerun_data(
-                observation=obs_processed, action=action_values, compress_images=display_compressed_images
+                observation=obs_processed,
+                action=storage_action_values if dataset is not None else action_values,
+                compress_images=display_compressed_images,
             )
 
         if intervention_state == INTERVENTION_STATE_RELEASE:

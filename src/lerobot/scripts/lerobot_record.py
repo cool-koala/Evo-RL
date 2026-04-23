@@ -88,6 +88,7 @@ from lerobot.robots import (  # noqa: F401
     bi_openarm_follower,
     bi_piper_follower,
     bi_so_follower,
+    dobot_xtrainer_follower,
     earthrover_mini_plus,
     hope_jr,
     koch_follower,
@@ -107,10 +108,12 @@ from lerobot.scripts.recording_hil import (
 )
 from lerobot.scripts.recording_loop import record_loop
 from lerobot.teleoperators import (  # noqa: F401
+    Teleoperator,
     TeleoperatorConfig,
     bi_openarm_leader,
     bi_piper_leader,
     bi_so_leader,
+    dobot_xtrainer_leader,
     homunculus,
     koch_leader,
     make_teleoperator_from_config,
@@ -337,6 +340,26 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
 
+    def maybe_prepare_autonomous_start() -> None:
+        if cfg.policy is None or teleop is None:
+            return
+
+        teleop_for_prepare = teleop
+        if isinstance(teleop, list):
+            teleop_for_prepare = next(
+                (
+                    item
+                    for item in teleop
+                    if type(item).prepare_for_autonomous_start is not Teleoperator.prepare_for_autonomous_start
+                ),
+                None,
+            )
+
+        if teleop_for_prepare is None:
+            return
+
+        teleop_for_prepare.prepare_for_autonomous_start(robot)
+
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
     dataset_features = combine_feature_dicts(
@@ -453,6 +476,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 events["episode_outcome"] = None
+                maybe_prepare_autonomous_start()
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 record_loop(
                     robot=robot,

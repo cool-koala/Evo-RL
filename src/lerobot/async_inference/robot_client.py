@@ -31,6 +31,21 @@ python src/lerobot/async_inference/robot_client.py \
     --aggregate_fn_name=weighted_average \
     --debug_visualize_queue_size=True
 ```
+
+Example with Dobot Xtrainer:
+```shell
+python -m lerobot.async_inference.robot_client \
+    --robot.type=dobot_xtrainer_follower \
+    --robot.dobot_root=/home/abc/guoxiaoyu/Dobot_Xtrainer/dobot_xtrainer-master \
+    --robot.action_mode=ee_pose \
+    --task="pick the cube" \
+    --server_address=127.0.0.1:8080 \
+    --policy_type=custom_cloud_policy \
+    --pretrained_name_or_path=dummy \
+    --policy_device=cpu \
+    --client_device=cpu \
+    --actions_per_chunk=8
+```
 """
 
 import logging
@@ -54,6 +69,7 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     bi_piper_follower,
     bi_so_follower,
+    dobot_xtrainer_follower,
     koch_follower,
     make_robot_from_config,
     omx_follower,
@@ -108,6 +124,9 @@ class RobotClient:
             lerobot_features,
             config.actions_per_chunk,
             config.policy_device,
+            action_feature_names=list(self.robot.action_features),
+            robot_type=self.robot.name,
+            action_mode=getattr(config.robot, "action_mode", ""),
         )
         self.channel = grpc.insecure_channel(
             self.server_address, grpc_channel_options(initial_backoff=f"{config.environment_dt:.4f}s")

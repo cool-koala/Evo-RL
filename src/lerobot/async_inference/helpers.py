@@ -270,6 +270,9 @@ class RemotePolicyConfig:
     actions_per_chunk: int
     device: str = "cpu"
     rename_map: dict[str, str] = field(default_factory=dict)
+    action_feature_names: list[str] = field(default_factory=list)
+    robot_type: str = ""
+    action_mode: str = ""
 
 
 def _compare_observation_states(obs1_state: torch.Tensor, obs2_state: torch.Tensor, atol: float) -> bool:

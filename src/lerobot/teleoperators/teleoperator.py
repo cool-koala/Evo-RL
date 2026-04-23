@@ -202,6 +202,32 @@ class Teleoperator(abc.ABC):
         """
         pass
 
+    def poll_control_events(self) -> dict[str, Any]:
+        """
+        Optionally expose device-side control events such as button presses.
+
+        The default implementation returns no events so existing teleoperators do not
+        need to implement it.
+        """
+        return {}
+
+    def sync_to_robot(self, robot: Any) -> None:
+        """
+        Optionally align the teleoperator pose with the current robot pose.
+
+        Teleoperators that do not need an explicit sync step can keep the default no-op.
+        """
+        del robot
+
+    def prepare_for_autonomous_start(self, robot: Any) -> None:
+        """
+        Optionally run a pre-autonomy handshake before policy control starts.
+
+        Typical implementations can move the follower to a start pose, synchronize the
+        teleoperator, and then lock it. Existing teleoperators can keep the default no-op.
+        """
+        del robot
+
     @abc.abstractmethod
     def disconnect(self) -> None:
         """Disconnect from the teleoperator and perform any necessary cleanup."""
