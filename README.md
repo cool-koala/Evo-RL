@@ -565,6 +565,11 @@ Iterative training loop (abstract):
   <img alt="EvoMind WeChat QR" src="./website/assets/images/rlgroup.jpg" width="220"/>
 </p>
 
+- So101 Supplier WeChat Contact, So101 设备提供商:
+<p align="center">
+  <img alt="So101 Supplier" src="./website/assets/images/so101provider.jpg" width="220"/>
+</p>
+
 ## Affiliations
 
 <p align="center">
