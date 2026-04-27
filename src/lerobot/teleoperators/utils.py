@@ -103,6 +103,10 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> "Teleoperator":
         from .bi_piper_leader import BiPiperLeader, BiPiperXLeader
 
         return BiPiperXLeader(config) if config.type == "bi_piperx_leader" else BiPiperLeader(config)
+    elif config.type == "cobot_magic_leader":
+        from .cobot_magic import CobotMagicLeader
+
+        return CobotMagicLeader(config)
     elif config.type == "bi_openarm_leader":
         from .bi_openarm_leader import BiOpenArmLeader
 

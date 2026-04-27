@@ -10,6 +10,7 @@ from lerobot.utils.control_utils import sanity_check_bimanual_piper_pair
     [
         ("bi_piper_follower", "bi_piper_leader"),
         ("bi_piperx_follower", "bi_piperx_leader"),
+        ("cobot_magic_follower", "cobot_magic_leader"),
         ("so101_follower", "so101_leader"),
     ],
 )
@@ -29,8 +30,11 @@ def test_sanity_check_bimanual_piper_pair_accepts_missing_teleop():
     [
         ("bi_piper_follower", "bi_piperx_leader"),
         ("bi_piperx_follower", "bi_piper_leader"),
+        ("cobot_magic_follower", "bi_piper_leader"),
+        ("bi_piperx_follower", "cobot_magic_leader"),
         ("so101_follower", "bi_piperx_leader"),
         ("so101_follower", "bi_piper_leader"),
+        ("so101_follower", "cobot_magic_leader"),
     ],
 )
 def test_sanity_check_bimanual_piper_pair_rejects_mixed_pairs(robot_type, teleop_type):

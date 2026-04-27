@@ -54,6 +54,7 @@ from lerobot.robots import (  # noqa: F401
     RobotConfig,
     bi_piper_follower,
     bi_so_follower,
+    cobot_magic,
     koch_follower,
     make_robot_from_config,
     omx_follower,

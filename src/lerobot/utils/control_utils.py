@@ -397,7 +397,7 @@ def sanity_check_dataset_robot_compatibility(
 
 
 def sanity_check_bimanual_piper_pair(robot_cfg, teleop_cfg) -> None:
-    """Ensure bimanual PiPER configs are not mixed between PiPER and PiPER-X variants."""
+    """Ensure bimanual robot and teleop configs are paired with the matching embodiment."""
     if teleop_cfg is None:
         return
 
@@ -406,16 +406,17 @@ def sanity_check_bimanual_piper_pair(robot_cfg, teleop_cfg) -> None:
     expected_teleop_by_robot = {
         "bi_piper_follower": "bi_piper_leader",
         "bi_piperx_follower": "bi_piperx_leader",
+        "cobot_magic_follower": "cobot_magic_leader",
     }
     expected_robot_by_teleop = {teleop: robot for robot, teleop in expected_teleop_by_robot.items()}
 
     if robot_type in expected_teleop_by_robot and teleop_type != expected_teleop_by_robot[robot_type]:
         expected = expected_teleop_by_robot[robot_type]
         raise ValueError(
-            f"In bimanual PiPER mode, '{robot_type}' must be paired with '{expected}', got '{teleop_type}'."
+            f"In bimanual robot mode, '{robot_type}' must be paired with '{expected}', got '{teleop_type}'."
         )
     if teleop_type in expected_robot_by_teleop and robot_type != expected_robot_by_teleop[teleop_type]:
         expected = expected_robot_by_teleop[teleop_type]
         raise ValueError(
-            f"In bimanual PiPER mode, '{teleop_type}' must be paired with '{expected}', got '{robot_type}'."
+            f"In bimanual robot mode, '{teleop_type}' must be paired with '{expected}', got '{robot_type}'."
         )

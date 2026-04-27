@@ -110,6 +110,7 @@ damiao = ["python-can>=4.2.0,<5.0.0"]
 openarms = ["lerobot[damiao]"]
 gamepad = ["lerobot[pygame-dep]", "hidapi>=0.14.0,<0.15.0"]
 hopejr = ["lerobot[feetech]", "lerobot[pygame-dep]"]
+cobot_magic = ["arx5-interface>=0.1.0,<0.2.0 ; sys_platform == 'linux'"]
 lekiwi = ["lerobot[feetech]", "pyzmq>=26.2.1,<28.0.0"]
 unitree_g1 = [
     "pyzmq>=26.2.1,<28.0.0",

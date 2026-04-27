@@ -34,5 +34,6 @@ SUPPORTED_ROBOTS = [
     "piperx_follower",
     "bi_piper_follower",
     "bi_piperx_follower",
+    "cobot_magic_follower",
     "omx_follower",
 ]

@@ -95,6 +95,7 @@ from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
     bi_so_follower,
+    cobot_magic,
     koch_follower,
     so_follower,
 )

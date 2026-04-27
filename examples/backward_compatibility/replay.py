@@ -39,6 +39,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
+    cobot_magic,
     koch_follower,
     make_robot_from_config,
     so_follower,

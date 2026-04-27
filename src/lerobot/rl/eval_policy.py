@@ -22,10 +22,12 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
+    cobot_magic,
     make_robot_from_config,
     so_follower,
 )
 from lerobot.teleoperators import (
+    cobot_magic as cobot_magic_leader,  # noqa: F401
     gamepad,  # noqa: F401
     so_leader,  # noqa: F401
 )
