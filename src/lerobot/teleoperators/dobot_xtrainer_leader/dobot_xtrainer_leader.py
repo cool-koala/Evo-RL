@@ -164,11 +164,29 @@ class DobotXTrainerLeader(Teleoperator):
         if self.config.leader_protection_auto_release_torque:
             try:
                 self._set_torque_mode(False)
+            except Exception:
+                LOGGER.debug("Failed to release Dobot leader torque after protection trigger.", exc_info=True)
             finally:
                 self._manual_control_enabled = True
 
+    def _limit_rotational_joint_step(self, target: np.ndarray, current: np.ndarray) -> np.ndarray:
+        max_rot_step_rad = np.deg2rad(max(self.config.leader_sync_max_rot_step_deg, 0.0))
+        if max_rot_step_rad <= 0:
+            return target
+
+        limited = np.array(target, dtype=np.float64, copy=True)
+        delta = joint_delta_vector(limited, current)
+        wrist_indices = np.array([3, 4, 5, 10, 11, 12], dtype=np.int64)
+        limited[wrist_indices] = current[wrist_indices] + np.clip(
+            delta[wrist_indices],
+            -max_rot_step_rad,
+            max_rot_step_rad,
+        )
+        return limited
+
     def _validate_target(self, target: np.ndarray, current: np.ndarray) -> np.ndarray:
         safe_target = clamp_joint_delta(target, current, self.config.leader_sync_max_joint_delta_rad)
+        safe_target = self._limit_rotational_joint_step(safe_target, current)
         safe_joint, joint_warnings = check_joint_safety(safe_target)
         if not safe_joint:
             raise RuntimeError("; ".join(joint_warnings))
@@ -277,32 +295,41 @@ class DobotXTrainerLeader(Teleoperator):
             events["toggle_intervention"] = True
         if button_events["sync_request"]:
             events["sync_request"] = True
-        if button_events["record_toggle"]:
+        if button_events["end_episode"]:
             events["exit_early"] = True
         return events
 
     def sync_to_robot(self, robot: Any) -> None:
-        if self._sensor_triggered():
-            raise RuntimeError("Cannot sync leader while the external safety sensor is triggered.")
+        try:
+            if self._sensor_triggered():
+                raise RuntimeError("Cannot sync leader while the external safety sensor is triggered.")
 
-        if self._protection_latched:
+            if self._protection_latched:
+                self._clear_protection_latch()
+
+            self.set_manual_control(False)
+            target_dict = robot.get_feedback_action_for_teleop()
+            current = self._current_joint_state()
+            target = joint_action_dict_to_array(target_dict, current)
+
+            max_delta = float(np.max(np.abs(joint_delta_vector(target, current))))
+            steps = max(1, int(max_delta / max(self.config.leader_sync_max_joint_delta_rad, 1e-6)))
+            steps = min(steps, 200)
+            for waypoint in np.linspace(current, target, steps + 1, dtype=np.float64)[1:]:
+                if self._sensor_triggered():
+                    raise RuntimeError("External leader sensor triggered during sync.")
+                current = self._current_joint_state()
+                self._update_stall_state(current)
+                safe_target = self._validate_target(waypoint, current)
+                self._send_joint_command_array(safe_target)
+                self._last_feedback_target = np.array(safe_target, copy=True)
+                time.sleep(1.0 / max(self.config.teleop_poll_hz, 1e-6))
+
             self._clear_protection_latch()
-
-        self.set_manual_control(False)
-        target_dict = robot.get_feedback_action_for_teleop()
-        current = self._current_joint_state()
-        target = joint_action_dict_to_array(target_dict, current)
-
-        max_delta = float(np.max(np.abs(joint_delta_vector(target, current))))
-        steps = max(1, int(max_delta / max(self.config.leader_sync_max_joint_delta_rad, 1e-6)))
-        steps = min(steps, 200)
-        for waypoint in np.linspace(current, target, steps + 1, dtype=np.float64)[1:]:
-            safe_target = self._validate_target(waypoint, self._current_joint_state())
-            self._send_joint_command_array(safe_target)
-            time.sleep(1.0 / max(self.config.teleop_poll_hz, 1e-6))
-
-        self._clear_protection_latch()
-        self._last_feedback_target = np.array(target, copy=True)
+            self._last_feedback_target = np.array(target, copy=True)
+        except Exception as exc:
+            self._trigger_protection(str(exc))
+            raise
 
     def prepare_for_autonomous_start(self, robot: Any) -> None:
         if hasattr(robot, "move_to_home"):

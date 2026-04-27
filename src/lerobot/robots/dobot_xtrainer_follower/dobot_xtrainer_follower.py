@@ -39,16 +39,17 @@ from lerobot.utils.dobot_xtrainer_utils import (
     clamp_joint_delta,
     ee_action_dict_to_array,
     ee_array_to_dict,
+    ensure_finite_array,
     ensure_dobot_import_path,
     is_ee_action,
     is_joint_action,
     joint_action_dict_to_array,
     joint_array_to_dict,
     load_dobot_camera_ids,
-    mmdeg_pose_to_ee_array,
     move_bimanual_joints_interpolated,
-    set_indicator_lights,
+    normalize_quat_xyzw,
     quat_xyzw_to_euler_xyz_deg,
+    set_indicator_lights,
 )
 
 from ..robot import Robot
@@ -124,7 +125,7 @@ class DobotXTrainerFollower(Robot):
             camera_ids = load_dobot_camera_ids(self._dobot_root)
             for camera_name, spec in CAMERA_LAYOUT.items():
                 camera = RealSenseCamera(device_id=camera_ids[camera_name], flip=spec["flip"])
-                worker = LatestCameraFrame(camera, name=camera_name)
+                worker = LatestCameraFrame(camera, name=camera_name, target_fps=self.config.camera_fps)
                 worker.start()
                 self._camera_classes[camera_name] = camera
                 self._camera_workers[camera_name] = worker
@@ -151,11 +152,58 @@ class DobotXTrainerFollower(Robot):
 
     def _current_joint_state(self) -> np.ndarray:
         robot = self._require_robot()
-        return np.asarray(robot.get_joint_state(), dtype=np.float64)
+        joint_state = ensure_finite_array(np.asarray(robot.get_joint_state(), dtype=np.float64), name="Dobot joint state")
+        if joint_state.shape[0] != 14:
+            raise ValueError(f"Expected 14 Dobot follower joints, got shape {joint_state.shape}.")
+
+        joint_state = np.array(joint_state, dtype=np.float64, copy=True)
+        joint_state[6] = self._read_gripper_position(
+            self._left_arm,
+            fallback=self._fallback_gripper_position(6, joint_state[6]),
+            side="left",
+        )
+        joint_state[13] = self._read_gripper_position(
+            self._right_arm,
+            fallback=self._fallback_gripper_position(13, joint_state[13]),
+            side="right",
+        )
+        return joint_state
 
     def _current_pose_state(self) -> np.ndarray:
         robot = self._require_robot()
-        return np.asarray(robot.get_XYZrxryrz_state(), dtype=np.float64)
+        pose_state = ensure_finite_array(
+            np.asarray(robot.get_XYZrxryrz_state(), dtype=np.float64),
+            name="Dobot Cartesian pose state",
+        )
+        if pose_state.shape[0] != 12:
+            raise ValueError(f"Expected 12 Dobot follower pose values, got shape {pose_state.shape}.")
+        return pose_state
+
+    def _fallback_gripper_position(self, index: int, observed: float) -> float:
+        if self._last_joint_action.shape[0] == 14 and np.isfinite(self._last_joint_action[index]):
+            return float(np.clip(self._last_joint_action[index], 0.0, 1.0))
+        return float(np.clip(observed, 0.0, 1.0))
+
+    def _read_gripper_position(self, arm: Any | None, *, fallback: float, side: str) -> float:
+        if arm is None or not getattr(arm, "_use_gripper", False):
+            return float(np.clip(fallback, 0.0, 1.0))
+
+        gripper = getattr(arm, "gripper", None)
+        if gripper is None or not hasattr(gripper, "get_current_position"):
+            return float(np.clip(fallback, 0.0, 1.0))
+
+        try:
+            raw_position = float(gripper.get_current_position())
+        except Exception:
+            LOGGER.warning(
+                "Failed to read %s follower gripper position; using fallback %.3f.",
+                side,
+                fallback,
+                exc_info=True,
+            )
+            return float(np.clip(fallback, 0.0, 1.0))
+
+        return float(np.clip(raw_position / 255.0, 0.0, 1.0))
 
     def _current_ee_action(self) -> np.ndarray:
         joint_state = self._current_joint_state()
@@ -242,7 +290,7 @@ class DobotXTrainerFollower(Robot):
     def _send_joint_action(self, action: RobotAction) -> RobotAction:
         robot = self._require_robot()
         current = self._current_joint_state()
-        target = joint_action_dict_to_array(action, current)
+        target = ensure_finite_array(joint_action_dict_to_array(action, current), name="Dobot joint action")
         safe_target = clamp_joint_delta(target, current, self.config.joint_delta_limit_rad)
         safe, warnings = check_joint_safety(safe_target)
         if not safe:
@@ -256,7 +304,9 @@ class DobotXTrainerFollower(Robot):
             raise RuntimeError("Dobot follower is not connected.")
 
         current = self._current_ee_action()
-        target = ee_action_dict_to_array(action, current)
+        target = ensure_finite_array(ee_action_dict_to_array(action, current), name="Dobot EE action")
+        target[3:7] = normalize_quat_xyzw(target[3:7], fallback=current[3:7], name="left EE quaternion")
+        target[11:15] = normalize_quat_xyzw(target[11:15], fallback=current[11:15], name="right EE quaternion")
         target[:8] = clamp_cartesian_step(
             target[:8],
             current[:8],
@@ -283,6 +333,8 @@ class DobotXTrainerFollower(Robot):
         if self.config.ee_command_settle_s > 0:
             time.sleep(self.config.ee_command_settle_s)
         self._last_ee_action = target
+        self._last_joint_action[6] = target[7]
+        self._last_joint_action[13] = target[15]
         return ee_array_to_dict(target)
 
     @check_if_not_connected

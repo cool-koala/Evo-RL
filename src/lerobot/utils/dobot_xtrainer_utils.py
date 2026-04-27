@@ -163,6 +163,33 @@ def wrap_degrees(angle: np.ndarray | float) -> np.ndarray | float:
     return (np.asarray(angle) + 180.0) % 360.0 - 180.0
 
 
+def ensure_finite_array(values: np.ndarray, *, name: str) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} contains NaN or infinite values.")
+    return array
+
+
+def normalize_quat_xyzw(
+    quat_xyzw: np.ndarray | list[float] | tuple[float, float, float, float],
+    *,
+    fallback: np.ndarray | list[float] | tuple[float, float, float, float] | None = None,
+    name: str = "quaternion",
+) -> np.ndarray:
+    quat = ensure_finite_array(np.asarray(quat_xyzw, dtype=np.float64), name=name)
+    norm = float(np.linalg.norm(quat))
+    if norm > 1e-6:
+        return quat / norm
+
+    if fallback is not None:
+        fallback_quat = ensure_finite_array(np.asarray(fallback, dtype=np.float64), name=f"{name} fallback")
+        fallback_norm = float(np.linalg.norm(fallback_quat))
+        if fallback_norm > 1e-6:
+            return fallback_quat / fallback_norm
+
+    raise ValueError(f"{name} has near-zero norm and cannot be normalized.")
+
+
 def euler_xyz_deg_to_quat_xyzw(euler_deg: np.ndarray | list[float] | tuple[float, float, float]) -> np.ndarray:
     roll, pitch, yaw = np.deg2rad(np.asarray(euler_deg, dtype=np.float64))
     cr = math.cos(roll * 0.5)
@@ -183,7 +210,7 @@ def euler_xyz_deg_to_quat_xyzw(euler_deg: np.ndarray | list[float] | tuple[float
 
 
 def quat_xyzw_to_euler_xyz_deg(quat_xyzw: np.ndarray | list[float] | tuple[float, float, float, float]) -> np.ndarray:
-    x, y, z, w = np.asarray(quat_xyzw, dtype=np.float64)
+    x, y, z, w = normalize_quat_xyzw(quat_xyzw)
 
     sinr_cosp = 2.0 * (w * x + y * z)
     cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
@@ -222,8 +249,8 @@ def bimanual_pose_mmdeg_to_ee_array(poses_mmdeg: np.ndarray, joint_state: np.nda
 
 
 def clamp_joint_delta(target: np.ndarray, current: np.ndarray, max_delta_rad: float) -> np.ndarray:
-    target = np.asarray(target, dtype=np.float64)
-    current = np.asarray(current, dtype=np.float64)
+    target = ensure_finite_array(np.asarray(target, dtype=np.float64), name="joint target")
+    current = ensure_finite_array(np.asarray(current, dtype=np.float64), name="joint current")
     delta = target - current
     joint_delta = wrap_radians(delta[:6])
     right_delta = wrap_radians(delta[7:13])
@@ -238,8 +265,8 @@ def clamp_joint_delta(target: np.ndarray, current: np.ndarray, max_delta_rad: fl
 
 
 def joint_delta_vector(target: np.ndarray, current: np.ndarray) -> np.ndarray:
-    target = np.asarray(target, dtype=np.float64)
-    current = np.asarray(current, dtype=np.float64)
+    target = ensure_finite_array(np.asarray(target, dtype=np.float64), name="joint target")
+    current = ensure_finite_array(np.asarray(current, dtype=np.float64), name="joint current")
     delta = target - current
     delta[:6] = wrap_radians(delta[:6])
     delta[7:13] = wrap_radians(delta[7:13])
@@ -253,9 +280,14 @@ def clamp_cartesian_step(
     max_translation_m: float,
     max_rotation_deg: float,
 ) -> np.ndarray:
-    target = np.asarray(target, dtype=np.float64)
-    current = np.asarray(current, dtype=np.float64)
+    target = ensure_finite_array(np.asarray(target, dtype=np.float64), name="cartesian target")
+    current = ensure_finite_array(np.asarray(current, dtype=np.float64), name="cartesian current")
     result = np.array(target, dtype=np.float64, copy=True)
+    current_quat = normalize_quat_xyzw(current[3:7], name="current cartesian quaternion")
+    target_quat = normalize_quat_xyzw(target[3:7], fallback=current_quat, name="target cartesian quaternion")
+    current = np.array(current, dtype=np.float64, copy=True)
+    current[3:7] = current_quat
+    result[3:7] = target_quat
 
     translation_delta = target[:3] - current[:3]
     translation_norm = float(np.linalg.norm(translation_delta))
@@ -263,7 +295,7 @@ def clamp_cartesian_step(
         result[:3] = current[:3] + translation_delta * (max_translation_m / translation_norm)
 
     current_euler = quat_xyzw_to_euler_xyz_deg(current[3:7])
-    target_euler = quat_xyzw_to_euler_xyz_deg(target[3:7])
+    target_euler = quat_xyzw_to_euler_xyz_deg(result[3:7])
     delta_euler = wrap_degrees(target_euler - current_euler)
     limited_euler = current_euler + np.clip(delta_euler, -max_rotation_deg, max_rotation_deg)
     result[3:7] = euler_xyz_deg_to_quat_xyzw(limited_euler)
@@ -461,9 +493,10 @@ def convert_leader_command_to_driver_space(leader_robot: Any, command: np.ndarra
 
 
 class LatestCameraFrame:
-    def __init__(self, camera: Any, *, name: str):
+    def __init__(self, camera: Any, *, name: str, target_fps: float | None = None):
         self.camera = camera
         self.name = name
+        self.target_fps = float(target_fps) if target_fps is not None and target_fps > 0 else 0.0
         self._frame = np.zeros(CAMERA_IMAGE_SHAPE, dtype=np.uint8)
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -474,7 +507,9 @@ class LatestCameraFrame:
         self._thread.start()
 
     def _run(self) -> None:
+        frame_period_s = 1.0 / self.target_fps if self.target_fps > 0 else 0.0
         while not self._stop_event.is_set():
+            started_t = time.perf_counter()
             try:
                 frame, _ = self.camera.read()
                 with self._lock:
@@ -482,6 +517,12 @@ class LatestCameraFrame:
             except Exception:
                 LOGGER.exception("Failed to read frame from Dobot camera '%s'.", self.name)
                 time.sleep(0.1)
+                continue
+
+            if frame_period_s > 0:
+                remaining_s = frame_period_s - (time.perf_counter() - started_t)
+                if remaining_s > 0:
+                    self._stop_event.wait(remaining_s)
 
     def get(self) -> np.ndarray:
         with self._lock:
@@ -515,7 +556,7 @@ class ButtonPressTracker:
         events = {
             "toggle_intervention": False,
             "sync_request": False,
-            "record_toggle": False,
+            "end_episode": False,
         }
         key_state = np.asarray(key_state, dtype=np.int64)
         key_delta = key_state - self._last_values
@@ -535,7 +576,7 @@ class ButtonPressTracker:
                     elif button == 0 and press_duration >= self.long_press_min_s:
                         events["sync_request"] = True
                     elif button == 1 and press_duration <= self.short_press_max_s:
-                        events["record_toggle"] = True
+                        events["end_episode"] = True
 
         self._last_values = key_state
         return events

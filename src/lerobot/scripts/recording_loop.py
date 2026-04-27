@@ -270,6 +270,7 @@ def record_loop(
                 except Exception:
                     logging.exception("Failed to synchronize teleoperator to current robot pose.")
                     set_robot_indicator("red")
+                    events["exit_early"] = True
 
             for key in ("exit_early", "rerecord_episode", "stop_recording", "toggle_intervention"):
                 if teleop_events.get(key):
