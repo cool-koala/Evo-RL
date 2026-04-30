@@ -448,7 +448,7 @@ def test_record_and_replay(tmp_path):
 
 def test_policy_sync_dual_arm_executor():
     robot = MagicMock()
-    robot.send_action.return_value = {"motor_1.pos": 10.0}
+    robot.send_action.return_value = {"motor_1.pos": 9.5}
     teleop = MagicMock()
 
     executor = PolicySyncDualArmExecutor(robot=robot, teleop=teleop, parallel_dispatch=True)
@@ -456,9 +456,9 @@ def test_policy_sync_dual_arm_executor():
     sent_action = executor.send_action(action)
     executor.shutdown()
 
-    assert sent_action == action
+    assert sent_action == {"motor_1.pos": 9.5}
     robot.send_action.assert_called_once_with(action)
-    teleop.send_feedback.assert_called_once_with(action)
+    teleop.send_feedback.assert_called_once_with(sent_action)
 
 
 def test_record_config_rejects_cfg_without_acp_enable():

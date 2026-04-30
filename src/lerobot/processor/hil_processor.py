@@ -442,21 +442,27 @@ class InterventionActionProcessorStep(ProcessorStep):
         # Override action if intervention is active
         if is_intervention and teleop_action is not None:
             if isinstance(teleop_action, dict):
-                # Convert teleop_action dict to tensor format
-                action_list = [
-                    teleop_action.get("delta_x", 0.0),
-                    teleop_action.get("delta_y", 0.0),
-                    teleop_action.get("delta_z", 0.0),
-                ]
-                if self.use_gripper:
-                    action_list.append(teleop_action.get(GRIPPER_KEY, 1.0))
+                if any(isinstance(key, str) and key.endswith(".pos") for key in teleop_action):
+                    # Cobot Magic/Piper 这类主从臂直接输出关节目标，不能压成 delta_x/y/z。
+                    new_transition[TransitionKey.ACTION] = dict(teleop_action)
+                    action_list = None
+                else:
+                    # Convert teleop_action dict to tensor format
+                    action_list = [
+                        teleop_action.get("delta_x", 0.0),
+                        teleop_action.get("delta_y", 0.0),
+                        teleop_action.get("delta_z", 0.0),
+                    ]
+                    if self.use_gripper:
+                        action_list.append(teleop_action.get(GRIPPER_KEY, 1.0))
             elif isinstance(teleop_action, np.ndarray):
                 action_list = teleop_action.tolist()
             else:
                 action_list = teleop_action
 
-            teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
-            new_transition[TransitionKey.ACTION] = teleop_action_tensor
+            if action_list is not None:
+                teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
+                new_transition[TransitionKey.ACTION] = teleop_action_tensor
 
         # Handle episode termination
         new_transition[TransitionKey.DONE] = bool(terminate_episode) or (

@@ -163,15 +163,36 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
         if self.robot is None:
             raise ValueError("Robot is not set")
 
-        present_current_dict = self.robot.bus.sync_read("Present_Current")  # type: ignore[attr-defined]
-        motor_currents = torch.tensor(
-            [present_current_dict[name] for name in self.robot.bus.motors],  # type: ignore[attr-defined]
-            dtype=torch.float32,
-        ).unsqueeze(0)
-
         current_state = observation.get(OBS_STATE)
         if current_state is None:
             return observation
+
+        if hasattr(self.robot, "bus") and hasattr(self.robot.bus, "motors"):  # type: ignore[attr-defined]
+            present_current_dict = self.robot.bus.sync_read("Present_Current")  # type: ignore[attr-defined]
+            current_values = [
+                present_current_dict[name] for name in self.robot.bus.motors  # type: ignore[attr-defined]
+            ]
+        else:
+            action_keys = [
+                key
+                for key in getattr(self.robot, "action_features", {})
+                if isinstance(key, str) and key.endswith(".pos")
+            ]
+            current_values = []
+            for action_key in action_keys:
+                torque_key = f"{action_key.removesuffix('.pos')}.torque"
+                if torque_key in observation:
+                    # Cobot Magic/ARX-5 暴露 torque，这里用力矩信号作为状态附加量。
+                    current_values.append(observation[torque_key])
+
+        if not current_values:
+            return observation
+
+        motor_currents = torch.tensor(
+            current_values,
+            dtype=current_state.dtype,
+            device=current_state.device,
+        ).reshape(1, -1)
 
         extended_state = torch.cat([current_state, motor_currents], dim=-1)
 
@@ -202,6 +223,14 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
             num_motors = 0
             if hasattr(self.robot, "bus") and hasattr(self.robot.bus, "motors"):  # type: ignore[attr-defined]
                 num_motors = len(self.robot.bus.motors)  # type: ignore[attr-defined]
+            elif hasattr(self.robot, "action_features"):
+                num_motors = len(
+                    [
+                        key
+                        for key in self.robot.action_features
+                        if isinstance(key, str) and key.endswith(".pos")
+                    ]
+                )
 
             if num_motors > 0:
                 new_shape = (original_feature.shape[0] + num_motors,) + original_feature.shape[1:]

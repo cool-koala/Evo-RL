@@ -196,13 +196,13 @@ class PolicySyncDualArmExecutor:
     def send_action(self, action: RobotAction) -> RobotAction:
         if self._pool is None:
             sent_action = self.robot.send_action(action)
-            self.teleop.send_feedback(action)
+            self.teleop.send_feedback(sent_action)
             return sent_action
 
         robot_future = self._pool.submit(self.robot.send_action, action)
-        teleop_future = self._pool.submit(self.teleop.send_feedback, action)
         sent_action = robot_future.result()
-        teleop_future.result()
+        # 主臂跟随 follower 实际接受的动作，避免限幅后主从目标不一致。
+        self.teleop.send_feedback(sent_action)
         return sent_action
 
     def shutdown(self) -> None:

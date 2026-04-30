@@ -2,6 +2,8 @@
 
 本文说明如何在 EvoRL/LeRobot 中使用 Cobot Magic 双臂机械臂。当前实现面向两条 ARX-5/X5 机械臂：一组作为 `cobot_magic_leader`，一组作为 `cobot_magic_follower`。
 
+如果目标是现场验证主从跟随、采集、回放和真机 RL rollout，请按更完整的 SOP 执行：[Cobot Magic 真机 RL 验证教程](cobot_magic_real_robot_validation.md)。
+
 ## 1. 安装依赖
 
 先安装本项目和 Cobot Magic 可选依赖。该 extra 会在 Linux 上安装 ARX5 官方 PyPI wheel；非 Linux 环境会跳过 SDK wheel，仍可运行无硬件单测：
@@ -13,7 +15,7 @@ pip install -e ".[dev,test,cobot_magic]"
 如果你的环境不能从 PyPI 安装 `arx5-interface`，请按 ARX5 SDK 官方仓库构建，并确保 Python 能 import：
 
 ```bash
-python -c "import arx5_interface; print('ARX5 SDK ok')"
+python3 -c "import arx5_interface; print('ARX5 SDK ok')"
 ```
 
 ARX5 SDK 参考：https://github.com/real-stanford/arx5-sdk
@@ -35,7 +37,7 @@ sudo ip link set up can2 type can bitrate 1000000
 sudo ip link set up can3 type can bitrate 1000000
 ```
 
-不要把左右臂配置到同一个 interface，否则程序会拒绝启动。
+不要让 follower 左右臂、leader 左右臂或主从之间共用同一个 interface，否则程序会拒绝启动。
 
 ## 3. Teleoperate 使用
 
@@ -97,7 +99,7 @@ lerobot-replay \
 无硬件单元测试使用 mock ARX SDK：
 
 ```bash
-pytest -q tests/test_cobot_magic.py tests/utils/test_control_utils.py
+python3 -m pytest -q tests/test_cobot_magic.py tests/utils/test_control_utils.py
 ```
 
 真实硬件 smoke test 建议先降低频率并空载执行：

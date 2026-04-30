@@ -105,18 +105,74 @@ class GymManipulatorConfig:
     device: str = "cpu"
 
 
-def reset_follower_position(robot_arm: Robot, target_position: np.ndarray) -> None:
+def _position_action_keys(robot: Robot, use_gripper: bool) -> list[str]:
+    action_keys = [key for key in robot.action_features if isinstance(key, str) and key.endswith(".pos")]
+    if not use_gripper:
+        action_keys = [key for key in action_keys if "gripper" not in key]
+    if not action_keys:
+        raise ValueError(f"{robot} does not expose any '.pos' action features for gym_manipulator.")
+    return action_keys
+
+
+def _motor_names_from_action_keys(action_keys: list[str]) -> list[str]:
+    return [key.removesuffix(".pos") for key in action_keys]
+
+
+def _action_array_to_dict(action, action_keys: list[str]) -> dict[str, float]:
+    if isinstance(action, torch.Tensor):
+        action_values = action.detach().cpu().numpy()
+    else:
+        action_values = np.asarray(action)
+    action_values = action_values.reshape(-1)
+    if action_values.shape[0] != len(action_keys):
+        raise ValueError(
+            f"Expected {len(action_keys)} joint actions for {action_keys}, got {action_values.shape[0]}."
+        )
+    return {key: float(action_values[idx]) for idx, key in enumerate(action_keys)}
+
+
+def _action_to_tensor(action, action_keys: list[str]) -> torch.Tensor:
+    if isinstance(action, torch.Tensor):
+        return action.detach().flatten().cpu()
+    if isinstance(action, dict):
+        missing_keys = [key for key in action_keys if key not in action]
+        if missing_keys:
+            raise KeyError(f"Robot action is missing required joint keys: {missing_keys}")
+        return torch.tensor([float(action[key]) for key in action_keys], dtype=torch.float32)
+    return torch.as_tensor(np.asarray(action).reshape(-1), dtype=torch.float32)
+
+
+def _neutral_action_for_env(env: gym.Env, use_gripper: bool) -> torch.Tensor:
+    if getattr(env, "use_end_effector_action", False):
+        neutral_action = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+        if use_gripper:
+            neutral_action = torch.cat([neutral_action, torch.tensor([1.0])])
+        return neutral_action
+
+    action_keys = getattr(env, "action_keys", [])
+    raw_joint_positions = env.get_raw_joint_positions() if hasattr(env, "get_raw_joint_positions") else None
+    if raw_joint_positions:
+        return torch.tensor([float(raw_joint_positions[key]) for key in action_keys], dtype=torch.float32)
+    return torch.zeros(env.action_space.shape[0], dtype=torch.float32)
+
+
+def reset_follower_position(robot_arm: Robot, action_keys: list[str], target_position: np.ndarray) -> None:
     """Reset robot arm to target position using smooth trajectory."""
-    current_position_dict = robot_arm.bus.sync_read("Present_Position")
-    current_position = np.array(
-        [current_position_dict[name] for name in current_position_dict], dtype=np.float32
-    )
+    current_observation = robot_arm.get_observation()
+    current_position = np.array([current_observation[key] for key in action_keys], dtype=np.float32)
+    target_position = np.asarray(target_position, dtype=np.float32).reshape(-1)
+    if target_position.shape != current_position.shape:
+        raise ValueError(
+            f"reset_pose must contain {len(action_keys)} values matching {action_keys}, "
+            f"got {len(target_position)}."
+        )
     trajectory = torch.from_numpy(
         np.linspace(current_position, target_position, 50)
     )  # NOTE: 30 is just an arbitrary number
     for pose in trajectory:
-        action_dict = dict(zip(current_position_dict, pose, strict=False))
-        robot_arm.bus.sync_write("Goal_Position", action_dict)
+        # 通过标准 Robot API 慢速回位，兼容没有 bus.motors 的 Python SDK 机械臂。
+        action_dict = {key: float(pose[idx]) for idx, key in enumerate(action_keys)}
+        robot_arm.send_action(action_dict)
         precise_sleep(0.015)
 
 
@@ -130,6 +186,7 @@ class RobotEnv(gym.Env):
         display_cameras: bool = False,
         reset_pose: list[float] | None = None,
         reset_time_s: float = 5.0,
+        use_end_effector_action: bool = False,
     ) -> None:
         """Initialize robot environment with configuration options.
 
@@ -144,6 +201,9 @@ class RobotEnv(gym.Env):
 
         self.robot = robot
         self.display_cameras = display_cameras
+        self.use_gripper = use_gripper
+        self.use_end_effector_action = use_end_effector_action
+        self._last_sent_action = None
 
         # Connect to the robot if not already connected.
         if not self.robot.is_connected:
@@ -153,15 +213,13 @@ class RobotEnv(gym.Env):
         self.current_step = 0
         self.episode_data = None
 
-        self._joint_names = [f"{key}.pos" for key in self.robot.bus.motors]
-        self._image_keys = self.robot.cameras.keys()
+        self._action_keys = _position_action_keys(self.robot, self.use_gripper)
+        self._joint_names = _motor_names_from_action_keys(self._action_keys)
+        self._image_keys = list(getattr(self.robot, "cameras", {}).keys())
 
         self.reset_pose = reset_pose
         self.reset_time_s = reset_time_s
 
-        self.use_gripper = use_gripper
-
-        self._joint_names = list(self.robot.bus.motors.keys())
         self._raw_joint_positions = None
 
         self._setup_spaces()
@@ -169,12 +227,21 @@ class RobotEnv(gym.Env):
     def _get_observation(self) -> RobotObservation:
         """Get current robot observation including joint positions and camera images."""
         obs_dict = self.robot.get_observation()
-        raw_joint_joint_position = {f"{name}.pos": obs_dict[f"{name}.pos"] for name in self._joint_names}
-        joint_positions = np.array([raw_joint_joint_position[f"{name}.pos"] for name in self._joint_names])
+        missing_keys = [key for key in self._action_keys if key not in obs_dict]
+        if missing_keys:
+            raise KeyError(f"Robot observation is missing action-position keys: {missing_keys}")
+        raw_joint_joint_position = {key: float(obs_dict[key]) for key in self._action_keys}
+        joint_positions = np.array([raw_joint_joint_position[key] for key in self._action_keys])
 
-        images = {key: obs_dict[key] for key in self._image_keys}
+        images = {key: obs_dict[key] for key in self._image_keys if key in obs_dict}
+        scalar_observation = {key: value for key, value in obs_dict.items() if key not in images}
 
-        return {"agent_pos": joint_positions, "pixels": images, **raw_joint_joint_position}
+        return {
+            "agent_pos": joint_positions,
+            "pixels": images,
+            **scalar_observation,
+            **raw_joint_joint_position,
+        }
 
     def _setup_spaces(self) -> None:
         """Configure observation and action spaces based on robot capabilities."""
@@ -203,16 +270,24 @@ class RobotEnv(gym.Env):
 
         self.observation_space = gym.spaces.Dict(observation_spaces)
 
-        # Define the action space for joint positions along with setting an intervention flag.
-        action_dim = 3
-        bounds = {}
-        bounds["min"] = -np.ones(action_dim)
-        bounds["max"] = np.ones(action_dim)
+        if self.use_end_effector_action:
+            # 逆运动学模式保持原来的 3D EE delta action；处理器会转成关节目标。
+            action_dim = 3
+            bounds = {}
+            bounds["min"] = -np.ones(action_dim)
+            bounds["max"] = np.ones(action_dim)
 
-        if self.use_gripper:
-            action_dim += 1
-            bounds["min"] = np.concatenate([bounds["min"], [0]])
-            bounds["max"] = np.concatenate([bounds["max"], [2]])
+            if self.use_gripper:
+                action_dim += 1
+                bounds["min"] = np.concatenate([bounds["min"], [0]])
+                bounds["max"] = np.concatenate([bounds["max"], [2]])
+        else:
+            # 直连关节模式下，policy action 维度和位置 key 对齐。
+            action_dim = len(self._action_keys)
+            bounds = {
+                "min": np.full(action_dim, -np.inf, dtype=np.float32),
+                "max": np.full(action_dim, np.inf, dtype=np.float32),
+            }
 
         self.action_space = gym.spaces.Box(
             low=bounds["min"],
@@ -238,7 +313,7 @@ class RobotEnv(gym.Env):
         start_time = time.perf_counter()
         if self.reset_pose is not None:
             log_say("Reset the environment.", play_sounds=True)
-            reset_follower_position(self.robot, np.array(self.reset_pose))
+            reset_follower_position(self.robot, self._action_keys, np.array(self.reset_pose))
             log_say("Reset the environment done.", play_sounds=True)
 
         precise_sleep(max(self.reset_time_s - (time.perf_counter() - start_time), 0.0))
@@ -249,18 +324,25 @@ class RobotEnv(gym.Env):
         self.current_step = 0
         self.episode_data = None
         obs = self._get_observation()
-        self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
+        self._raw_joint_positions = {key: obs[key] for key in self._action_keys}
         return obs, {TeleopEvents.IS_INTERVENTION: False}
 
     def step(self, action) -> tuple[RobotObservation, float, bool, bool, dict[str, Any]]:
         """Execute one environment step with given action."""
-        joint_targets_dict = {f"{key}.pos": action[i] for i, key in enumerate(self.robot.bus.motors.keys())}
+        if isinstance(action, dict):
+            # 介入时 Cobot Magic leader 会直接给出 left_joint_*.pos/right_joint_*.pos 目标。
+            joint_targets_dict = {key: float(action[key]) for key in self._action_keys if key in action}
+            if len(joint_targets_dict) != len(self._action_keys):
+                missing_keys = [key for key in self._action_keys if key not in action]
+                raise KeyError(f"Robot action is missing required joint keys: {missing_keys}")
+        else:
+            joint_targets_dict = _action_array_to_dict(action, self._action_keys)
 
-        self.robot.send_action(joint_targets_dict)
+        self._last_sent_action = self.robot.send_action(joint_targets_dict)
 
         obs = self._get_observation()
 
-        self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
+        self._raw_joint_positions = {key: obs[key] for key in self._action_keys}
 
         if self.display_cameras:
             self.render()
@@ -276,7 +358,7 @@ class RobotEnv(gym.Env):
             reward,
             terminated,
             truncated,
-            {TeleopEvents.IS_INTERVENTION: False},
+            {TeleopEvents.IS_INTERVENTION: False, "sent_action": self._last_sent_action},
         )
 
     def render(self) -> None:
@@ -299,6 +381,14 @@ class RobotEnv(gym.Env):
     def get_raw_joint_positions(self) -> dict[str, float]:
         """Get raw joint positions."""
         return self._raw_joint_positions
+
+    @property
+    def action_keys(self) -> list[str]:
+        return list(self._action_keys)
+
+    @property
+    def motor_names(self) -> list[str]:
+        return list(self._joint_names)
 
 
 def make_robot_env(cfg: HILSerlRobotEnvConfig) -> tuple[gym.Env, Any]:
@@ -343,13 +433,24 @@ def make_robot_env(cfg: HILSerlRobotEnvConfig) -> tuple[gym.Env, Any]:
         cfg.processor.observation.display_cameras if cfg.processor.observation is not None else False
     )
     reset_pose = cfg.processor.reset.fixed_reset_joint_positions if cfg.processor.reset is not None else None
+    reset_time_s = cfg.processor.reset.reset_time_s if cfg.processor.reset is not None else 5.0
+    use_end_effector_action = cfg.processor.inverse_kinematics is not None
 
-    env = RobotEnv(
-        robot=robot,
-        use_gripper=use_gripper,
-        display_cameras=display_cameras,
-        reset_pose=reset_pose,
-    )
+    try:
+        env = RobotEnv(
+            robot=robot,
+            use_gripper=use_gripper,
+            display_cameras=display_cameras,
+            reset_pose=reset_pose,
+            reset_time_s=reset_time_s,
+            use_end_effector_action=use_end_effector_action,
+        )
+    except Exception:
+        if teleop_device.is_connected:
+            teleop_device.disconnect()
+        if robot.is_connected:
+            robot.disconnect()
+        raise
 
     return env, teleop_device
 
@@ -395,7 +496,7 @@ def make_processors(
 
     # Full processor pipeline for real robot environment
     # Get robot and motor information for kinematics
-    motor_names = list(env.robot.bus.motors.keys())
+    motor_names = env.motor_names if hasattr(env, "motor_names") else []
 
     # Set up kinematics solver if inverse kinematics is configured
     kinematics_solver = None
@@ -546,6 +647,7 @@ def step_env_and_process_transition(
     processed_action = processed_action_transition[TransitionKey.ACTION]
 
     obs, reward, terminated, truncated, info = env.step(processed_action)
+    sent_action = info.pop("sent_action", processed_action)
 
     reward = reward + processed_action_transition[TransitionKey.REWARD]
     terminated = terminated or processed_action_transition[TransitionKey.DONE]
@@ -556,7 +658,7 @@ def step_env_and_process_transition(
 
     new_transition = create_transition(
         observation=obs,
-        action=processed_action,
+        action=sent_action,
         reward=reward,
         done=terminated,
         truncated=truncated,
@@ -610,9 +712,13 @@ def control_loop(
 
     dataset = None
     if cfg.mode == "record":
-        action_features = teleop_device.action_features
+        action_feature_names = list(getattr(env, "action_keys", teleop_device.action_features))
         features = {
-            ACTION: action_features,
+            ACTION: {
+                "dtype": "float32",
+                "shape": (len(action_feature_names),),
+                "names": action_feature_names,
+            },
             REWARD: {"dtype": "float32", "shape": (1,), "names": None},
             DONE: {"dtype": "bool", "shape": (1,), "names": None},
         }
@@ -656,9 +762,7 @@ def control_loop(
         step_start_time = time.perf_counter()
 
         # Create a neutral action (no movement)
-        neutral_action = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
-        if use_gripper:
-            neutral_action = torch.cat([neutral_action, torch.tensor([1.0])])  # Gripper stay
+        neutral_action = _neutral_action_for_env(env, use_gripper)
 
         # Use the new step function
         transition = step_env_and_process_transition(
@@ -677,13 +781,12 @@ def control_loop(
                 for k, v in transition[TransitionKey.OBSERVATION].items()
                 if isinstance(v, torch.Tensor)
             }
-            # Use teleop_action if available, otherwise use the action from the transition
-            action_to_record = transition[TransitionKey.COMPLEMENTARY_DATA].get(
-                "teleop_action", transition[TransitionKey.ACTION]
-            )
+            # 记录处理器输出后的最终动作，和真实发送给 robot 的目标保持一致。
+            action_to_record = transition[TransitionKey.ACTION]
+            action_tensor = _action_to_tensor(action_to_record, getattr(env, "action_keys", []))
             frame = {
                 **observations,
-                ACTION: action_to_record.cpu(),
+                ACTION: action_tensor,
                 REWARD: np.array([transition[TransitionKey.REWARD]], dtype=np.float32),
                 DONE: np.array([terminated or truncated], dtype=bool),
             }
@@ -701,7 +804,10 @@ def control_loop(
         if terminated or truncated:
             episode_time = time.perf_counter() - episode_start_time
             logging.info(
-                f"Episode ended after {episode_step} steps in {episode_time:.1f}s with reward {transition[TransitionKey.REWARD]}"
+                "Episode ended after %s steps in %.1fs with reward %s",
+                episode_step,
+                episode_time,
+                transition[TransitionKey.REWARD],
             )
             episode_step = 0
             episode_idx += 1

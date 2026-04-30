@@ -30,10 +30,12 @@ class CobotMagicLeaderConfig(TeleoperatorConfig):
     right_arm_config: CobotMagicArmConfig
     # manual_control=true 时，连接后立即进入 ARX SDK damping 模式，并使用 SDK 重力补偿。
     manual_control: bool = True
+    # Cobot Magic 主臂没有按钮事件；默认把主臂姿态视为人工接管。
+    # 这样 RL smoke test 可以直接验证主从跟随。
+    always_intervene: bool = True
 
     def __post_init__(self):
         validate_cobot_magic_arm_config(self.left_arm_config)
         validate_cobot_magic_arm_config(self.right_arm_config)
         if self.left_arm_config.interface == self.right_arm_config.interface:
             raise ValueError("Cobot Magic left and right leaders must use different interfaces.")
-

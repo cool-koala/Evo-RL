@@ -4,14 +4,22 @@ from types import SimpleNamespace
 import draccus
 import numpy as np
 import pytest
+import torch
 from draccus.utils import ParsingError
 
-from lerobot.processor import make_default_processors
+from lerobot.processor import (
+    InterventionActionProcessorStep,
+    TransitionKey,
+    create_transition,
+    make_default_processors,
+)
+from lerobot.rl.gym_manipulator import RobotEnv
 from lerobot.robots.cobot_magic import CobotMagicFollower, CobotMagicFollowerConfig
 from lerobot.robots.utils import make_robot_from_config
 from lerobot.scripts.lerobot_record import RecordConfig
 from lerobot.scripts.lerobot_teleoperate import TeleoperateConfig
 from lerobot.teleoperators.cobot_magic import CobotMagicLeader, CobotMagicLeaderConfig
+from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.teleoperators.utils import make_teleoperator_from_config
 from lerobot.utils.arx5_sdk import CobotMagicArmConfig
 
@@ -261,7 +269,7 @@ def test_cobot_magic_follower_clamps_and_sends_full_joint_state(monkeypatch):
     )
     robot.connect()
     try:
-        assert "left_gripper.pos" not in robot.action_features
+        assert "left_gripper.pos" in robot.action_features
         action = {
             "left_joint_1.pos": 1.0,
             "left_joint_2.pos": 1.0,
@@ -342,6 +350,71 @@ def test_cobot_magic_leader_sync_gripper_false_omits_gripper(monkeypatch):
         assert action["left_joint_1.pos"] == pytest.approx(0.1)
     finally:
         teleop.disconnect()
+
+
+def test_cobot_magic_leader_reports_default_intervention_events():
+    teleop = make_teleoperator_from_config(make_leader_config())
+
+    events = teleop.get_teleop_events()
+
+    assert events[TeleopEvents.IS_INTERVENTION] is True
+    assert events[TeleopEvents.TERMINATE_EPISODE] is False
+
+
+def test_cobot_magic_joint_dict_intervention_is_preserved():
+    processor = InterventionActionProcessorStep(use_gripper=True)
+    teleop_action = {
+        "left_joint_1.pos": 0.1,
+        "left_joint_2.pos": 0.2,
+        "right_joint_1.pos": 0.3,
+        "right_joint_2.pos": 0.4,
+    }
+    transition = create_transition(
+        action=torch.zeros(4),
+        info={TeleopEvents.IS_INTERVENTION: True},
+        complementary_data={"teleop_action": teleop_action},
+    )
+
+    processed = processor(transition)
+
+    assert processed[TransitionKey.ACTION] == teleop_action
+
+
+def test_cobot_magic_robot_env_uses_standard_action_features(monkeypatch):
+    install_fake_arx5(monkeypatch)
+
+    robot = make_robot_from_config(make_robot_config())
+    env = RobotEnv(robot, use_gripper=True, reset_time_s=0.0)
+    try:
+        assert env.action_space.shape == (14,)
+        action = np.array(
+            [
+                0.11,
+                0.21,
+                0.31,
+                0.41,
+                0.51,
+                0.61,
+                0.04,
+                0.12,
+                0.22,
+                0.32,
+                0.42,
+                0.52,
+                0.62,
+                0.05,
+            ],
+            dtype=np.float32,
+        )
+
+        env.step(action)
+
+        assert robot.left_arm.controller.last_cmd.pos()[0] == pytest.approx(0.11)
+        assert robot.left_arm.controller.last_cmd.gripper_pos == pytest.approx(0.04)
+        assert robot.right_arm.controller.last_cmd.pos()[5] == pytest.approx(0.62)
+        assert robot.right_arm.controller.last_cmd.gripper_pos == pytest.approx(0.05)
+    finally:
+        env.close()
 
 
 def test_cobot_magic_roundtrip_through_default_processors(monkeypatch):

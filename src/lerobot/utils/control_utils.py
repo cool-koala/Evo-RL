@@ -420,3 +420,32 @@ def sanity_check_bimanual_piper_pair(robot_cfg, teleop_cfg) -> None:
         raise ValueError(
             f"In bimanual robot mode, '{teleop_type}' must be paired with '{expected}', got '{robot_type}'."
         )
+
+    if robot_type == "cobot_magic_follower" and teleop_type == "cobot_magic_leader":
+        _sanity_check_cobot_magic_interfaces(robot_cfg, teleop_cfg)
+
+
+def _sanity_check_cobot_magic_interfaces(robot_cfg, teleop_cfg) -> None:
+    """Ensure Cobot Magic follower and leader do not share a hardware interface."""
+
+    interface_entries = [
+        ("follower left", getattr(robot_cfg.left_arm_config, "interface", None)),
+        ("follower right", getattr(robot_cfg.right_arm_config, "interface", None)),
+        ("leader left", getattr(teleop_cfg.left_arm_config, "interface", None)),
+        ("leader right", getattr(teleop_cfg.right_arm_config, "interface", None)),
+    ]
+    seen: dict[str, str] = {}
+    duplicates: list[str] = []
+    for label, interface in interface_entries:
+        if interface is None:
+            continue
+        if interface in seen:
+            duplicates.append(f"{interface} is used by {seen[interface]} and {label}")
+        else:
+            seen[interface] = label
+
+    if duplicates:
+        raise ValueError(
+            "Cobot Magic follower and leader interfaces must be unique across all four arms: "
+            + "; ".join(duplicates)
+        )

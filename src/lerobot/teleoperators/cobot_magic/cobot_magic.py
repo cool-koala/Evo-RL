@@ -22,6 +22,7 @@ from typing import Any
 
 from lerobot.processor import RobotAction
 from lerobot.robots.cobot_magic.cobot_magic import _CobotMagicArm
+from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.utils.arx5_sdk import ARX5_GRIPPER_KEY, CobotMagicArmConfig
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
@@ -46,11 +47,11 @@ class _CobotMagicLeaderArm(_CobotMagicArm):
             self._manual_control_enabled = True
             return
         if not enabled and self._manual_control_enabled is not False:
-            # ARX SDK 没有单独的“退出 damping”API；下一次 set_joint_cmd 会重新进入关节命令控制。
+            # ARX SDK 没有单独的“退出 damping”API；下一次命令会重新进入关节控制。
             self._manual_control_enabled = False
 
     def get_action(self) -> RobotAction:
-        # 读取真实关节反馈，而不是上一次命令，确保人工拖动时 action 跟随实际 leader 姿态。
+        # 读取真实关节反馈，确保人工拖动时 action 跟随实际 leader 姿态。
         action = self._current_action()
         if not self.config.sync_gripper:
             # 不同步夹爪时直接省略夹爪 key，follower 会保持自己的当前夹爪位置。
@@ -58,7 +59,7 @@ class _CobotMagicLeaderArm(_CobotMagicArm):
         return action
 
     def send_feedback(self, feedback: dict[str, Any]) -> None:
-        # 策略回放或 HIL 同步 leader 时，先退出手动示教，再像 follower 一样发送关节目标。
+        # 策略回放或 HIL 同步 leader 时，先退出手动示教再发送关节目标。
         self.set_manual_control(False)
         self.send_action(feedback)
 
@@ -136,6 +137,15 @@ class CobotMagicLeader(Teleoperator):
         right_action = self.right_arm.get_action()
         action.update({f"right_{key}": value for key, value in right_action.items()})
         return action
+
+    def get_teleop_events(self) -> dict[TeleopEvents, bool]:
+        # RL 处理器需要事件接口；主臂没有按钮时用配置决定是否始终人工接管。
+        return {
+            TeleopEvents.IS_INTERVENTION: self.config.always_intervene,
+            TeleopEvents.TERMINATE_EPISODE: False,
+            TeleopEvents.SUCCESS: False,
+            TeleopEvents.RERECORD_EPISODE: False,
+        }
 
     @check_if_not_connected
     def send_feedback(self, feedback: dict[str, Any]) -> None:

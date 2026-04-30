@@ -101,9 +101,9 @@ def _slow_reset_all_arms_to_pose(
     for idx in range(1, steps + 1):
         alpha = idx / steps
         action = {key: start_pose[key] + (goal_pose[key] - start_pose[key]) * alpha for key in joint_keys}
-        robot.send_action(action)
+        sent_action = robot.send_action(action)
         if teleop is not None and not isinstance(teleop, list):
-            teleop.send_feedback(action)
+            teleop.send_feedback(sent_action)
         time.sleep(step_dt_s)
 
     logging.info("Episode ended. Arms returned to the stored reset pose in %.1fs.", duration_s)

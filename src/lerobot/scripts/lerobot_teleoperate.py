@@ -269,10 +269,9 @@ def teleoperate(cfg: TeleoperateConfig):
     )
     _configure_robot_for_lightweight_teleop(robot, should_fetch_obs)
 
-    teleop.connect()
-    robot.connect()
-
     try:
+        teleop.connect()
+        robot.connect()
         teleop_loop(
             teleop=teleop,
             robot=robot,
@@ -289,8 +288,10 @@ def teleoperate(cfg: TeleoperateConfig):
     finally:
         if cfg.display_data:
             rr.rerun_shutdown()
-        teleop.disconnect()
-        robot.disconnect()
+        if teleop.is_connected:
+            teleop.disconnect()
+        if robot.is_connected:
+            robot.disconnect()
 
 
 def main():
