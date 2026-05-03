@@ -1,0 +1,18 @@
+<launch>
+
+    <!-- <param name="/use_sim_time" value="true" /> -->
+    <arg name="reconfigure" default="false" />
+    <arg name="control_mode" default="0" doc="Control mode: 0=arx5_rc, 1=5a_rc, 2=arx5_joint_control, 3=5a_joint_control, 4=arx5_pos_control, 5=5a_pos_control" />
+    <arg name="command_topic" default="/cobot_magic/command/joint_right" />
+    <arg name="state_topic" default="/cobot_magic/puppet/joint_right" />
+    <arg name="end_topic" default="/cobot_magic/puppet/end_right" />
+
+    <node if="$(arg reconfigure)" name="configure" pkg="rqt_reconfigure" type="rqt_reconfigure"> </node>
+    <node name="arm_node2" pkg="arm_control" type="arm_node2" respawn="true" output="screen">
+        <param name="control_mode" value="$(arg control_mode)" />
+        <param name="command_topic" value="$(arg command_topic)" />
+        <param name="state_topic" value="$(arg state_topic)" />
+        <param name="end_topic" value="$(arg end_topic)" />
+    </node>
+
+</launch>

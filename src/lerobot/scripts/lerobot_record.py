@@ -89,6 +89,7 @@ from lerobot.robots import (  # noqa: F401
     bi_piper_follower,
     bi_so_follower,
     cobot_magic,
+    cobot_magic_ros,
     earthrover_mini_plus,
     hope_jr,
     koch_follower,
@@ -100,19 +101,31 @@ from lerobot.robots import (  # noqa: F401
     so_follower,
     unitree_g1 as unitree_g1_robot,
 )
+from lerobot.scripts.lerobot_teleoperate import _run_startup_sync_if_requested
 from lerobot.scripts.recording_hil import (
+    HIL_LEADER_MODE_PARKED,
+    HIL_LEADER_MODES,
     ACPInferenceConfig,
     PolicySyncDualArmExecutor,
     _capture_policy_runtime_state,  # noqa: F401
     _predict_policy_action_with_acp_inference,  # noqa: F401
 )
 from lerobot.scripts.recording_loop import record_loop
+from lerobot.scripts.robot_reset import (
+    default_reset_pose_path,
+    load_optional_named_joint_pose,
+    load_reset_pose,
+    make_zero_pose,
+    save_reset_pose,
+    slow_reset_all_arms_to_pose,
+)
 from lerobot.teleoperators import (  # noqa: F401
     TeleoperatorConfig,
     bi_openarm_leader,
     bi_piper_leader,
     bi_so_leader,
     cobot_magic as cobot_magic_leader,
+    cobot_magic_ros as cobot_magic_ros_leader,
     homunculus,
     koch_leader,
     make_teleoperator_from_config,
@@ -126,7 +139,6 @@ from lerobot.teleoperators import (  # noqa: F401
 from lerobot.utils.constants import ACTION
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
-    is_headless,
     sanity_check_bimanual_piper_pair,
     sanity_check_dataset_name,
     sanity_check_dataset_robot_compatibility,
@@ -142,6 +154,14 @@ from lerobot.utils.utils import (
     log_say,
 )
 from lerobot.utils.visualization_utils import init_rerun
+
+COBOT_MAGIC_ROS_PROJECT_ZERO_POSE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "robots"
+    / "cobot_magic_ros"
+    / "reset_poses"
+    / "cobot_magic_ros_x5_initial_pose.json"
+)
 
 
 @dataclass
@@ -241,6 +261,27 @@ class RecordConfig:
     communication_retry_timeout_s: float = 2.0
     # Sleep interval between communication retries (seconds).
     communication_retry_interval_s: float = 0.1
+    # Use a fixed zero/reset pose as the data-collection initial pose.
+    reset_to_zero_pose: bool = False
+    # Optional joint reset pose JSON. If omitted, a per robot type/id path under HF cache is used.
+    reset_pose_path: str | Path | None = None
+    # Prompt once on connect and save the current follower pose as the reset pose.
+    capture_reset_pose: bool = False
+    # Move the follower robot to the stored reset pose before the first recorded episode.
+    reset_before_record: bool = False
+    # Move the follower robot to the stored reset pose after each recorded episode, including the last one.
+    reset_after_episode: bool = False
+    # Duration used for slow reset-pose interpolation.
+    reset_duration_s: float = 5.0
+    # Tolerance for checking that the leader/data start pose matches the reset pose.
+    reset_pose_tolerance: float = 0.05
+    # HIL leader behavior. `parked` keeps Cobot Magic leader at the saved start pose until takeover;
+    # `piper` mirrors the policy action to the leader through policy_sync_to_teleop.
+    hil_leader_mode: str = HIL_LEADER_MODE_PARKED
+    # Duration to move the parked leader from start pose to the current follower pose on intervention.
+    hil_leader_sync_duration_s: float = 5.0
+    # Duration to move the parked leader back to the saved start pose after intervention.
+    hil_leader_return_duration_s: float = 5.0
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -290,6 +331,18 @@ class RecordConfig:
             raise ValueError("`communication_retry_timeout_s` must be >= 0.")
         if self.communication_retry_interval_s <= 0:
             raise ValueError("`communication_retry_interval_s` must be > 0.")
+        if self.reset_to_zero_pose and self.capture_reset_pose:
+            raise ValueError("`reset_to_zero_pose=true` cannot be used with `capture_reset_pose=true`.")
+        if self.reset_duration_s <= 0:
+            raise ValueError("`reset_duration_s` must be > 0.")
+        if self.reset_pose_tolerance < 0:
+            raise ValueError("`reset_pose_tolerance` must be >= 0.")
+        if self.hil_leader_mode not in HIL_LEADER_MODES:
+            raise ValueError(f"`hil_leader_mode` must be one of {HIL_LEADER_MODES}.")
+        if self.hil_leader_sync_duration_s <= 0:
+            raise ValueError("`hil_leader_sync_duration_s` must be > 0.")
+        if self.hil_leader_return_duration_s <= 0:
+            raise ValueError("`hil_leader_return_duration_s` must be > 0.")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -318,6 +371,120 @@ def _ensure_human_inloop_compatible_features(
         "shape": (1,),
         "names": ["state"],
     }
+
+
+def _record_reset_pose_path(cfg: RecordConfig) -> Path:
+    if cfg.reset_pose_path is not None:
+        return Path(cfg.reset_pose_path).expanduser()
+    robot_type = cfg.robot.type if hasattr(cfg.robot, "type") else type(cfg.robot).__name__
+    return default_reset_pose_path(robot_type, cfg.robot.id)
+
+
+def _record_zero_pose_path(cfg: RecordConfig) -> Path | None:
+    if cfg.reset_pose_path is not None:
+        return Path(cfg.reset_pose_path).expanduser()
+    robot_type = cfg.robot.type if hasattr(cfg.robot, "type") else type(cfg.robot).__name__
+    if robot_type == "cobot_magic_ros_follower":
+        return COBOT_MAGIC_ROS_PROJECT_ZERO_POSE_PATH
+    return None
+
+
+def _prepare_record_reset_pose(cfg: RecordConfig, robot) -> dict[str, float] | None:
+    if not (
+        cfg.reset_to_zero_pose
+        or cfg.capture_reset_pose
+        or cfg.reset_before_record
+        or cfg.reset_after_episode
+    ):
+        return None
+
+    if cfg.reset_to_zero_pose:
+        pose_path = _record_zero_pose_path(cfg)
+        if pose_path is not None:
+            if not pose_path.is_file():
+                raise FileNotFoundError(f"Fixed zero pose file does not exist: {pose_path}")
+            logging.info("Using fixed project zero/reset pose from %s.", pose_path)
+            return load_reset_pose(pose_path)
+        logging.info("Using literal joint-zero pose as the reset pose.")
+        return make_zero_pose(robot)
+
+    pose_path = _record_reset_pose_path(cfg)
+    if cfg.capture_reset_pose:
+        logging.info(
+            "Capturing reset pose immediately from the current follower state: %s. "
+            "Place all arms at the reset/zero pose before launching this command.",
+            pose_path,
+        )
+        return save_reset_pose(robot=robot, pose_path=pose_path)
+
+    if not pose_path.is_file():
+        raise FileNotFoundError(
+            f"Reset pose file does not exist: {pose_path}. "
+            "Run once with `--capture_reset_pose=true`, or pass `--reset_pose_path` to an existing pose."
+        )
+    return load_reset_pose(pose_path)
+
+
+def _prepare_record_leader_reset_pose(cfg: RecordConfig) -> dict[str, float] | None:
+    if not (cfg.reset_to_zero_pose or cfg.reset_before_record or cfg.reset_after_episode):
+        return None
+    pose_path = _record_zero_pose_path(cfg) if cfg.reset_to_zero_pose else _record_reset_pose_path(cfg)
+    if pose_path is None or not pose_path.is_file():
+        return None
+    return load_optional_named_joint_pose(pose_path, "leader_joint_pos")
+
+
+def _slow_reset_if_requested(
+    *,
+    cfg: RecordConfig,
+    robot,
+    teleop,
+    reset_pose: dict[str, float] | None,
+    leader_reset_pose: dict[str, float] | None = None,
+) -> None:
+    if reset_pose is None:
+        return
+    slow_reset_all_arms_to_pose(
+        robot=robot,
+        teleop=teleop,
+        target_pose=reset_pose,
+        teleop_target_pose=leader_reset_pose,
+        duration_s=cfg.reset_duration_s,
+        fps=cfg.dataset.fps,
+    )
+
+
+def _run_record_startup_sync_if_requested(cfg: RecordConfig, robot, teleop) -> None:
+    if teleop is None or isinstance(teleop, list):
+        return
+    _run_startup_sync_if_requested(robot, teleop, cfg.dataset.fps)
+
+
+def _assert_teleop_matches_reset_pose_if_required(
+    *,
+    cfg: RecordConfig,
+    teleop,
+    reset_pose: dict[str, float] | None,
+) -> None:
+    if not cfg.reset_to_zero_pose or reset_pose is None or teleop is None or isinstance(teleop, list):
+        return
+    if getattr(cfg, "hil_leader_mode", None) == HIL_LEADER_MODE_PARKED:
+        return
+    action = teleop.get_absolute_action() if hasattr(teleop, "get_absolute_action") else teleop.get_action()
+    reference_pose = reset_pose
+    pose_path = _record_zero_pose_path(cfg)
+    if pose_path is not None and pose_path.is_file():
+        reference_pose = load_optional_named_joint_pose(pose_path, "leader_joint_pos") or reset_pose
+    joint_keys = [key for key in reference_pose if key in action]
+    if not joint_keys:
+        return
+    max_delta = max(abs(float(action[key]) - float(reference_pose[key])) for key in joint_keys)
+    if max_delta > cfg.reset_pose_tolerance:
+        raise RuntimeError(
+            "Recording must start from the fixed zero/start pose, but the leader is not aligned "
+            f"({max_delta:.3f} rad > {cfg.reset_pose_tolerance:.3f} rad). "
+            "Move both leader arms to the saved start pose with gravity compensation before starting."
+        )
 
 
 @parser.wrap()
@@ -431,8 +598,15 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         on_record_connected = getattr(cfg, "_on_record_connected", None)
         if callable(on_record_connected):
             on_record_connected(robot, teleop)
+        reset_pose = _prepare_record_reset_pose(cfg, robot)
+        leader_reset_pose = _prepare_record_leader_reset_pose(cfg)
 
-        if cfg.policy_sync_to_teleop:
+        policy_sync_requested = cfg.policy_sync_to_teleop
+        if cfg.hil_leader_mode == HIL_LEADER_MODE_PARKED and cfg.policy_sync_to_teleop:
+            logging.info("Disabling policy_sync_to_teleop because hil_leader_mode='parked'.")
+            policy_sync_requested = False
+
+        if policy_sync_requested:
             if cfg.policy is None:
                 raise ValueError("`policy_sync_to_teleop=true` requires `policy` to be set.")
             if teleop is None or isinstance(teleop, list):
@@ -455,6 +629,16 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 events["episode_outcome"] = None
+                if cfg.reset_before_record and not (cfg.capture_reset_pose and recorded_episodes == 0):
+                    _slow_reset_if_requested(
+                        cfg=cfg,
+                        robot=robot,
+                        teleop=teleop,
+                        reset_pose=reset_pose,
+                        leader_reset_pose=leader_reset_pose,
+                    )
+                _assert_teleop_matches_reset_pose_if_required(cfg=cfg, teleop=teleop, reset_pose=reset_pose)
+                _run_record_startup_sync_if_requested(cfg, robot, teleop)
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
@@ -479,6 +663,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     acp_inference=cfg.acp_inference,
                     communication_retry_timeout_s=cfg.communication_retry_timeout_s,
                     communication_retry_interval_s=cfg.communication_retry_interval_s,
+                    hil_leader_mode=cfg.hil_leader_mode,
+                    hil_leader_sync_duration_s=cfg.hil_leader_sync_duration_s,
+                    hil_leader_return_duration_s=cfg.hil_leader_return_duration_s,
+                    hil_leader_return_action=leader_reset_pose,
                 )
 
                 episode_success = None
@@ -498,6 +686,14 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 on_episode_outcome = getattr(cfg, "_on_record_episode_outcome", None)
                 if callable(on_episode_outcome):
                     on_episode_outcome(robot, teleop, episode_success)
+                if cfg.reset_after_episode and not events["stop_recording"]:
+                    _slow_reset_if_requested(
+                        cfg=cfg,
+                        robot=robot,
+                        teleop=teleop,
+                        reset_pose=reset_pose,
+                        leader_reset_pose=leader_reset_pose,
+                    )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
@@ -528,6 +724,10 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         acp_inference=cfg.acp_inference,
                         communication_retry_timeout_s=cfg.communication_retry_timeout_s,
                         communication_retry_interval_s=cfg.communication_retry_interval_s,
+                        hil_leader_mode=cfg.hil_leader_mode,
+                        hil_leader_sync_duration_s=cfg.hil_leader_sync_duration_s,
+                        hil_leader_return_duration_s=cfg.hil_leader_return_duration_s,
+                        hil_leader_return_action=leader_reset_pose,
                     )
 
                 if events["rerecord_episode"]:

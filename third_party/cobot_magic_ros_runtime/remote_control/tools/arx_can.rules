@@ -1,0 +1,9 @@
+# 机械臂serial号顺序：右后0, 右前1, 左后2, 左前3
+# 右后0
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16d0", ATTRS{idProduct}=="117e", ATTRS{serial}=="208138A14D4D", SYMLINK+="canable0"
+# 右前1
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16d0", ATTRS{idProduct}=="117e", ATTRS{serial}=="206638814D4D", SYMLINK+="canable1"
+# 左后2
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16d0", ATTRS{idProduct}=="117e", ATTRS{serial}=="206E387D4D4D", SYMLINK+="canable2"
+# 左前3
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16d0", ATTRS{idProduct}=="117e", ATTRS{serial}=="2072389F4D4D", SYMLINK+="canable3"

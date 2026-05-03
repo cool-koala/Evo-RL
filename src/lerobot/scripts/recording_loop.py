@@ -35,6 +35,7 @@ from lerobot.processor import (
 )
 from lerobot.robots import Robot
 from lerobot.scripts.recording_hil import (
+    HIL_LEADER_MODE_PARKED,
     INTERVENTION_STATE_ACTIVE,
     INTERVENTION_STATE_POLICY,
     INTERVENTION_STATE_RELEASE,
@@ -52,6 +53,67 @@ from lerobot.utils.utils import get_safe_torch_device
 from lerobot.utils.visualization_utils import log_rerun_data
 
 T = TypeVar("T")
+
+
+def _get_joint_only_observation(robot: Robot) -> RobotObservation:
+    get_joint_observation = getattr(robot, "get_joint_observation", None)
+    if callable(get_joint_observation):
+        return get_joint_observation()
+    return robot.get_observation()
+
+
+def _make_hold_action(robot: Robot) -> RobotAction:
+    obs = _get_joint_only_observation(robot)
+    hold_action = {
+        key: float(obs[key])
+        for key in robot.action_features
+        if key.endswith(".pos") and key in obs
+    }
+    if not hold_action:
+        raise RuntimeError("Cannot hold robot for HIL transition: no matching '.pos' action keys found.")
+    return hold_action
+
+
+def _move_teleop_to_action_while_holding_robot(
+    *,
+    teleop: Teleoperator,
+    robot: Robot,
+    target_action: RobotAction,
+    hold_action: RobotAction,
+    duration_s: float,
+    fps: int,
+) -> None:
+    if duration_s <= 0:
+        raise ValueError("`duration_s` must be > 0.")
+    if fps <= 0:
+        raise ValueError("`fps` must be > 0.")
+    if not hasattr(teleop, "send_feedback"):
+        raise RuntimeError("Parked HIL requires teleop.send_feedback support.")
+    if not hasattr(teleop, "get_absolute_action"):
+        raise RuntimeError("Parked HIL requires teleop.get_absolute_action support.")
+
+    start_action = teleop.get_absolute_action()
+    feedback_features = getattr(teleop, "feedback_features", {})
+    feedback_feature_keys = list(feedback_features) if hasattr(feedback_features, "keys") else []
+    candidate_keys = feedback_feature_keys or list(target_action)
+    joint_keys = [
+        key for key in candidate_keys if key.endswith(".pos") and key in start_action
+    ]
+    if not joint_keys:
+        raise RuntimeError("Parked HIL leader transition has no matching joint position keys.")
+
+    steps = max(int(duration_s * fps), 1)
+    step_dt_s = duration_s / steps
+    for idx in range(1, steps + 1):
+        alpha = idx / steps
+        feedback_action: RobotAction = {
+            key: float(start_action[key])
+            + (float(target_action.get(key, start_action[key])) - float(start_action[key])) * alpha
+            for key in joint_keys
+        }
+        teleop.send_feedback(feedback_action)
+        robot.send_action(hold_action)
+        precise_sleep(step_dt_s)
 
 
 """ --------------- record_loop() data flow --------------------------
@@ -114,6 +176,10 @@ def record_loop(
     acp_inference: ACPInferenceConfig | None = None,
     communication_retry_timeout_s: float = 2.0,
     communication_retry_interval_s: float = 0.1,
+    hil_leader_mode: str = HIL_LEADER_MODE_PARKED,
+    hil_leader_sync_duration_s: float = 5.0,
+    hil_leader_return_duration_s: float = 5.0,
+    hil_leader_return_action: RobotAction | None = None,
 ):
     if acp_inference is None:
         acp_inference = ACPInferenceConfig()
@@ -198,6 +264,29 @@ def record_loop(
         # Start in S0: policy drives both arms, teleop arm should accept feedback commands.
         set_teleop_manual_control(False)
 
+    parked_hil_enabled = (
+        intervention_enabled
+        and hil_leader_mode == HIL_LEADER_MODE_PARKED
+        and isinstance(teleop, Teleoperator)
+        and hasattr(teleop, "send_feedback")
+        and hasattr(teleop, "get_absolute_action")
+    )
+    parked_hil_home_action = hil_leader_return_action
+    if parked_hil_enabled and parked_hil_home_action is None:
+        parked_hil_home_action = teleop.get_absolute_action()
+
+    def reset_policy_and_processors() -> None:
+        nonlocal cond_policy_runtime_state, uncond_policy_runtime_state
+        if policy is None or preprocessor is None or postprocessor is None:
+            return
+        policy.reset()
+        preprocessor.reset()
+        postprocessor.reset()
+        if acp_inference.enable and acp_inference.use_cfg:
+            cond_policy_runtime_state = _capture_policy_runtime_state(policy)
+            uncond_policy_runtime_state = _capture_policy_runtime_state(policy)
+        logging.info("Policy cache reset on release: next policy action is recomputed.")
+
     def run_with_connection_retry(action_name: str, fn: Callable[[], T]) -> T:
         timeout_s = max(communication_retry_timeout_s, 0.0)
         interval_s = max(communication_retry_interval_s, 0.0)
@@ -251,22 +340,64 @@ def record_loop(
             events["toggle_intervention"] = False
             if intervention_enabled:
                 if intervention_state == INTERVENTION_STATE_POLICY:
-                    intervention_state = INTERVENTION_STATE_ACTIVE
-                    set_teleop_manual_control(True)
-                    logging.info("Intervention enabled (S1): teleop actions now override policy execution.")
+                    if parked_hil_enabled:
+                        transition_start_t = time.perf_counter()
+                        hold_action = _make_hold_action(robot)
+                        logging.info(
+                            "Parked HIL enter requested: holding follower and syncing leader over %.2fs.",
+                            hil_leader_sync_duration_s,
+                        )
+                        _move_teleop_to_action_while_holding_robot(
+                            teleop=teleop,
+                            robot=robot,
+                            target_action=hold_action,
+                            hold_action=hold_action,
+                            duration_s=hil_leader_sync_duration_s,
+                            fps=fps,
+                        )
+                        set_teleop_manual_control(True)
+                        intervention_state = INTERVENTION_STATE_ACTIVE
+                        start_episode_t += time.perf_counter() - transition_start_t
+                        logging.info(
+                            "Intervention enabled (S1): teleop actions now override policy execution."
+                        )
+                        continue
+                    else:
+                        intervention_state = INTERVENTION_STATE_ACTIVE
+                        set_teleop_manual_control(True)
+                        logging.info(
+                            "Intervention enabled (S1): teleop actions now override policy execution."
+                        )
                 else:
-                    intervention_state = INTERVENTION_STATE_RELEASE
-                    set_teleop_manual_control(False)
-                    if policy is not None and preprocessor is not None and postprocessor is not None:
-                        policy.reset()
-                        preprocessor.reset()
-                        postprocessor.reset()
-                        if acp_inference.enable and acp_inference.use_cfg:
-                            cond_policy_runtime_state = _capture_policy_runtime_state(policy)
-                            uncond_policy_runtime_state = _capture_policy_runtime_state(policy)
-                    if policy is not None and preprocessor is not None and postprocessor is not None:
-                        logging.info("Policy cache reset on release: next policy action is recomputed.")
-                    logging.info("Intervention release requested (S2): returning control to policy.")
+                    if parked_hil_enabled:
+                        if parked_hil_home_action is None:
+                            raise RuntimeError("Parked HIL release requires a leader home action.")
+                        transition_start_t = time.perf_counter()
+                        hold_action = _make_hold_action(robot)
+                        set_teleop_manual_control(False)
+                        intervention_state = INTERVENTION_STATE_RELEASE
+                        logging.info(
+                            "Parked HIL release requested: holding follower and returning leader over %.2fs.",
+                            hil_leader_return_duration_s,
+                        )
+                        _move_teleop_to_action_while_holding_robot(
+                            teleop=teleop,
+                            robot=robot,
+                            target_action=parked_hil_home_action,
+                            hold_action=hold_action,
+                            duration_s=hil_leader_return_duration_s,
+                            fps=fps,
+                        )
+                        reset_policy_and_processors()
+                        intervention_state = INTERVENTION_STATE_POLICY
+                        start_episode_t += time.perf_counter() - transition_start_t
+                        logging.info("Intervention released (S0): returning control to policy.")
+                        continue
+                    else:
+                        intervention_state = INTERVENTION_STATE_RELEASE
+                        set_teleop_manual_control(False)
+                        reset_policy_and_processors()
+                        logging.info("Intervention release requested (S2): returning control to policy.")
             else:
                 logging.info("Intervention toggle ignored because policy+teleop are not both active.")
 
