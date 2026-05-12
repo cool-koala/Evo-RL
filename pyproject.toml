@@ -110,7 +110,12 @@ damiao = ["python-can>=4.2.0,<5.0.0"]
 openarms = ["lerobot[damiao]"]
 gamepad = ["lerobot[pygame-dep]", "hidapi>=0.14.0,<0.15.0"]
 hopejr = ["lerobot[feetech]", "lerobot[pygame-dep]"]
-cobot_magic = ["arx5-interface>=0.1.0,<0.2.0 ; sys_platform == 'linux'"]
+cobot_magic = [
+    "arx5-interface>=0.1.0,<0.2.0 ; sys_platform == 'linux'",
+    "catkin_pkg>=1.0.0,<2.0.0",
+    "h5py>=3.10.0,<4.0.0",
+    "rospkg>=1.5.0,<2.0.0",
+]
 lekiwi = ["lerobot[feetech]", "pyzmq>=26.2.1,<28.0.0"]
 unitree_g1 = [
     "pyzmq>=26.2.1,<28.0.0",
@@ -214,6 +219,8 @@ lerobot-imgtransform-viz="lerobot.scripts.lerobot_imgtransform_viz:main"
 lerobot-edit-dataset="lerobot.scripts.lerobot_edit_dataset:main"
 lerobot-setup-can="lerobot.scripts.lerobot_setup_can:main"
 lerobot-human-inloop-record="lerobot.scripts.lerobot_human_inloop_record:main"
+lerobot-convert-cobot-magic-open-drawer="lerobot.scripts.convert_cobot_magic_open_drawer:main"
+lerobot-check-cobot-magic-policy-sanity="lerobot.scripts.check_cobot_magic_policy_sanity:main"
 lerobot-value-train="lerobot.scripts.lerobot_value_train:main"
 lerobot-value-infer="lerobot.scripts.lerobot_value_infer:main"
 lerobot-dataset-report="lerobot.scripts.lerobot_dataset_report:main"

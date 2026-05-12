@@ -1,0 +1,97 @@
+# Diffusion Policy
+
+Diffusion Policy is an imitation-learning policy for visuomotor control. It predicts a short horizon of future robot actions by denoising action trajectories conditioned on camera images and robot state.
+
+It is a strong option for contact-rich manipulation and tasks with multiple valid motion styles, but it is heavier than ACT during both training and inference. For a first real-robot Cobot Magic/X5 closed-loop test, start with [ACT](./act), then use Diffusion Policy once the data collection, replay, and HIL path are stable.
+
+## Model Overview
+
+Diffusion Policy was introduced in [Diffusion Policy: Visuomotor Policy Learning via Action Diffusion](https://diffusion-policy.cs.columbia.edu). The LeRobot implementation uses:
+
+- RGB observations from one or more cameras
+- proprioceptive robot state
+- a ResNet visual encoder
+- a conditional 1D U-Net action denoiser
+- action chunking for real-time execution
+
+Compared with ACT, Diffusion Policy can model more expressive action distributions, but the iterative denoising process makes inference slower. Keep this in mind for real robots where command latency and action smoothness matter.
+
+## Installation Requirements
+
+1. Install LeRobot by following the [Installation Guide](./installation).
+2. Diffusion Policy is included in the standard training stack. If dependencies are missing in your environment, reinstall with development extras:
+
+```bash
+pip install -e ".[dev,test]"
+```
+
+## Training
+
+Train Diffusion Policy with the standard `lerobot-train` entrypoint:
+
+```bash
+lerobot-train \
+  --dataset.repo_id=${HF_USER}/your_dataset \
+  --policy.type=diffusion \
+  --output_dir=outputs/train/diffusion_your_dataset \
+  --job_name=diffusion_your_dataset \
+  --policy.device=cuda \
+  --wandb.enable=true \
+  --policy.repo_id=${HF_USER}/diffusion_policy
+```
+
+For a local Cobot Magic/X5 dataset, start with a smaller batch size and no Hub upload:
+
+```bash
+lerobot-train \
+  --dataset.repo_id=local/cobot_magic_ros_task_v1 \
+  --policy.type=diffusion \
+  --policy.device=cuda \
+  --batch_size=4 \
+  --steps=100000 \
+  --eval_freq=0 \
+  --save_freq=10000 \
+  --save_checkpoint=true \
+  --wandb.enable=false \
+  --policy.push_to_hub=false \
+  --output_dir=outputs/train/cobot_magic_ros_diffusion_v1
+```
+
+## Training Tips
+
+- Start with `batch_size=4` on 16 GB GPUs and increase only if memory allows.
+- Use `batch_size=8` or higher on 24 GB GPUs for better throughput.
+- Keep `policy.n_action_steps` lower than or equal to `policy.horizon`.
+- Use ACT first when validating new hardware integration; Diffusion Policy is better as a second baseline after the robot-side safety path is proven.
+- For real-time HIL, measure policy inference latency before putting the robot near objects.
+
+## Evaluating
+
+Once training is complete, pass the checkpoint directory through `--policy.path`:
+
+```bash
+lerobot-record \
+  --robot.type=so100_follower \
+  --robot.port=/dev/ttyACM0 \
+  --robot.id=my_robot \
+  --display_data=true \
+  --dataset.repo_id=${HF_USER}/eval_diffusion_your_dataset \
+  --dataset.num_episodes=10 \
+  --dataset.single_task="Your task description" \
+  --policy.path=outputs/train/diffusion_your_dataset/checkpoints/last/pretrained_model
+```
+
+For Cobot Magic/X5 HIL, use the same checkpoint path with `lerobot-human-inloop-record`. Keep the
+default three ROS camera streams enabled for recording new HIL datasets; a single-view checkpoint can still
+consume only the camera key it was trained with while the extra views are saved for future multi-view training.
+
+## Citation
+
+```bibtex
+@article{chi2024diffusionpolicy,
+  author = {Cheng Chi and Zhenjia Xu and Siyuan Feng and Eric Cousineau and Yilun Du and Benjamin Burchfiel and Russ Tedrake and Shuran Song},
+  title = {Diffusion Policy: Visuomotor Policy Learning via Action Diffusion},
+  journal = {The International Journal of Robotics Research},
+  year = {2024},
+}
+```

@@ -57,6 +57,18 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+!third_party/cobot_magic_ros_runtime/remote_control/**/src/arm_control/src/arx_lib/libx86.so
+third_party/cobot_magic_ros_runtime/remote_control/**/devel/
+third_party/cobot_magic_ros_runtime/remote_control/**/install/
+third_party/cobot_magic_ros_runtime/remote_control/**/log/
+third_party/cobot_magic_ros_runtime/remote_control/**/.catkin_workspace
+third_party/cobot_magic_ros_runtime/remote_control/**/src/CMakeLists.txt
+third_party/cobot_magic_ros_runtime/camera_ws/build/
+third_party/cobot_magic_ros_runtime/camera_ws/devel/
+third_party/cobot_magic_ros_runtime/camera_ws/install/
+third_party/cobot_magic_ros_runtime/camera_ws/log/
+third_party/cobot_magic_ros_runtime/camera_ws/.catkin_workspace
+third_party/cobot_magic_ros_runtime/camera_ws/src/CMakeLists.txt
 *.sage.py
 .cache/
 .ruff_cache/
@@ -165,6 +177,8 @@ wandb/
 
 # Data folders
 data/
+data/cobot_magic_open_drawer_left_v1/
+data/cobot_magic_open_drawer_local_bimanual_v1/
 outputs/
 
 # Translations
@@ -177,4 +191,3 @@ outputs/
 *.urdf
 *.xml
 *.part
-AGENTS.md

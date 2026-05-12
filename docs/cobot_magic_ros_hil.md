@@ -106,18 +106,18 @@ cd /home/abc/guoxiaoyu/Dobot_Xtrainer/Evo-RL/third_party/cobot_magic_ros_runtime
 
 ## 主从 Smoke Test
 
-先关闭夹爪同步、禁用相机，只测试关节跟随。`startup_sync` 会先让从臂慢速对齐主臂姿态，再进入相对跟随：
+默认开启夹爪同步、禁用相机，只测试低速主从动作链路。`startup_sync` 会先让从臂慢速对齐主臂姿态，再进入相对跟随：
 
 ```bash
 source /opt/ros/noetic/setup.zsh
 lerobot-teleoperate \
   --robot.type=cobot_magic_ros_follower \
   --robot.id=cobot_magic_ros_follower_smoke \
-  --robot.sync_gripper=false \
+  --robot.sync_gripper=true \
   --robot.cameras='{}' \
   --teleop.type=cobot_magic_ros_leader \
   --teleop.id=cobot_magic_ros_leader_smoke \
-  --teleop.sync_gripper=false \
+  --teleop.sync_gripper=true \
   --teleop.manual_control=true \
   --teleop.relative_takeover=true \
   --teleop.startup_sync=true \
@@ -129,9 +129,80 @@ lerobot-teleoperate \
 
 如果主从姿态差超过 `startup_sync_max_joint_delta`，程序会拒绝同步；先手动摆近，或在确认安全后调大该阈值。
 
+## 本地真机数据训练 policy
+
+当前开抽屉 policy 不再混用网络/Piper 数据。使用本地 ARX-X5 HDF5 数据生成一个部署一致的数据集：14D action 保持本地顺序 `[left 6 joints, left gripper, right 6 joints, right gripper]`，`observation.state` 转成 ROS follower 使用的 42D 顺序，只保留左腕相机。
+
+```bash
+lerobot-convert-cobot-magic-open-drawer --overwrite
+```
+
+默认输出：
+
+- 数据集：`data/cobot_magic_open_drawer_local_bimanual_v1/lerobot`
+- repo id：`local/cobot_magic_open_drawer_local_bimanual_v1`
+- 本任务 reset pose：`data/cobot_magic_open_drawer_local_bimanual_v1/reset_pose.json`
+
+ACT 第一版建议使用较短 action chunk，先验证 HIL 稳定性：
+
+```bash
+lerobot-train \
+  --dataset.repo_id=local/cobot_magic_open_drawer_local_bimanual_v1 \
+  --dataset.root=data/cobot_magic_open_drawer_local_bimanual_v1/lerobot \
+  --policy.type=act \
+  --policy.repo_id=local/cobot_magic_open_drawer_local_bimanual_act_v1 \
+  --policy.device=cuda \
+  --policy.chunk_size=30 \
+  --policy.n_action_steps=10 \
+  --batch_size=4 \
+  --steps=100000 \
+  --eval_freq=0 \
+  --save_freq=10000 \
+  --save_checkpoint=true \
+  --wandb.enable=false \
+  --policy.push_to_hub=false \
+  --output_dir=outputs/train/cobot_magic_open_drawer_local_bimanual_act_v1
+```
+
+Diffusion 使用同一个数据集：
+
+```bash
+lerobot-train \
+  --dataset.repo_id=local/cobot_magic_open_drawer_local_bimanual_v1 \
+  --dataset.root=data/cobot_magic_open_drawer_local_bimanual_v1/lerobot \
+  --policy.type=diffusion \
+  --policy.repo_id=local/cobot_magic_open_drawer_local_bimanual_diffusion_v1 \
+  --policy.device=cuda \
+  --batch_size=16 \
+  --steps=100000 \
+  --eval_freq=0 \
+  --save_freq=10000 \
+  --save_checkpoint=true \
+  --wandb.enable=false \
+  --policy.push_to_hub=false \
+  --output_dir=outputs/train/cobot_magic_open_drawer_local_bimanual_diffusion_v1
+```
+
+上机前先离线检查 checkpoint。这个检查会在本地数据样本上比较 `pred_action`、数据 action 和当前 state；不通过时不要直接跑真机 HIL。
+
+```bash
+lerobot-check-cobot-magic-policy-sanity \
+  --dataset-repo-id=local/cobot_magic_open_drawer_local_bimanual_v1 \
+  --dataset-root=data/cobot_magic_open_drawer_local_bimanual_v1/lerobot \
+  --policy-path=outputs/train/cobot_magic_open_drawer_local_bimanual_act_v1/checkpoints/100000/pretrained_model \
+  --device=cuda \
+  --output-report=outputs/train/cobot_magic_open_drawer_local_bimanual_act_v1/policy_sanity_report.json
+```
+
 ## Evo-RL HIL 命令
 
-使用 ROS 后端类型。默认会读取三路相机；只有纯关节调试时才加 `--robot.cameras='{}'`：
+使用 ROS 后端类型。HIL 数据录制默认读取三路相机：
+
+- `cam_high`: `/camera_f/color/image_raw`
+- `cam_left_wrist`: `/camera_l/color/image_raw`
+- `cam_right_wrist`: `/camera_r/color/image_raw`
+
+不要在 HIL 录制命令里覆盖 `--robot.cameras` 为单相机；只有纯关节调试时才加 `--robot.cameras='{}'`。当前本地 ACT/Diffusion checkpoint 的 policy 输入仍只使用 `cam_left_wrist`，但 HIL 新数据会保存三路图像，后续可用于重新训练三视角 policy。
 
 这里的 0 位指数据采集的初始物理姿态，不要求 ROS JointState 数值全为 `0.0`。这台机器当前固定初始姿态已写入 `src/lerobot/robots/cobot_magic_ros/reset_poses/cobot_magic_ros_x5_initial_pose.json`。从臂通过 `--reset_to_zero_pose=true` 慢速插值回 JSON 里的 `joint_pos`；主臂通过 leader command topic 慢速插值回 JSON 里的 `leader_joint_pos`。
 
@@ -144,37 +215,47 @@ HIL 有两种主臂语义：
 lerobot-human-inloop-record \
   --robot.type=cobot_magic_ros_follower \
   --robot.id=cobot_magic_ros_follower_hil \
-  --robot.sync_gripper=false \
+  --robot.sync_gripper=true \
+  --robot.max_relative_target=0.02 \
   --teleop.type=cobot_magic_ros_leader \
   --teleop.id=cobot_magic_ros_leader_hil \
-  --teleop.sync_gripper=false \
+  --teleop.sync_gripper=true \
+  --teleop.manual_control=true \
   --teleop.relative_takeover=true \
-  --reset_to_zero_pose=true \
+  --teleop.startup_sync=false \
+  --reset_pose_path=data/cobot_magic_open_drawer_local_bimanual_v1/reset_pose.json \
   --reset_before_record=true \
   --reset_after_episode=true \
   --reset_duration_s=8.0 \
   --hil_leader_mode=parked \
   --hil_leader_sync_duration_s=5.0 \
   --hil_leader_return_duration_s=5.0 \
-  --dataset.repo_id=local/cobot_magic_ros_hil \
-  --dataset.single_task="your task" \
-  --policy.path=/path/to/policy \
+  --dataset.repo_id=local/eval_cobot_magic_open_drawer_hil_act_001 \
+  --dataset.single_task="open the drawer" \
+  --dataset.num_episodes=1 \
+  --dataset.episode_time_s=10 \
+  --dataset.reset_time_s=5 \
+  --policy.path=outputs/train/cobot_magic_open_drawer_local_bimanual_act_v1/checkpoints/100000/pretrained_model \
+  --policy.device=cuda \
   --dataset.fps=30 \
-  --dataset.push_to_hub=false
+  --dataset.push_to_hub=false \
+  --display_data=true
 ```
 
 按 `i` 进入或退出人工接管。接管期间，主臂增量会叠加到当前从臂姿态，因此从臂不会跳到主臂的绝对姿态。`parked` 模式的主臂同步/回初始过渡阶段不写入 dataset，不会占用 episode 有效时长。
 
-普通遥操作采集建议使用 `lerobot-record`，并显式打开 reset 和 startup sync：
+第一次上机用 `--robot.max_relative_target=0.02`。确认 policy 不再抽搐后，再逐步放宽到 `0.05`。如果需要跑 Diffusion，把 `--policy.path` 改成 Diffusion checkpoint，并先跑同样的 sanity check。
+
+普通遥操作采集建议使用 `lerobot-record`，并显式打开 reset 和 startup sync。正常数据录制也默认保存三路相机；不要加单相机 `--robot.cameras` 覆盖。
 
 ```bash
 lerobot-record \
   --robot.type=cobot_magic_ros_follower \
   --robot.id=cobot_magic_ros_follower_record \
-  --robot.sync_gripper=false \
+  --robot.sync_gripper=true \
   --teleop.type=cobot_magic_ros_leader \
   --teleop.id=cobot_magic_ros_leader_record \
-  --teleop.sync_gripper=false \
+  --teleop.sync_gripper=true \
   --teleop.manual_control=true \
   --teleop.relative_takeover=true \
   --teleop.startup_sync=true \
@@ -195,7 +276,7 @@ lerobot-record \
   --display_data=true
 ```
 
-`reset_before_record` 会在每段开始前把从臂慢速拉回 JSON 固定初始姿态；`teleop.startup_sync` 会确认主臂也在这个姿态附近，并重新建立相对接管零点；`reset_after_episode` 在每段正常结束后把从臂慢速拉回初始姿态。按 `Esc` 停止采集时会跳过自动回位。
+`reset_before_record` 会在每段开始前把从臂慢速拉回 JSON 固定初始姿态；`teleop.startup_sync` 会确认主臂也在这个姿态附近，并重新建立相对接管零点；`reset_after_episode` 在每段结束后把从臂慢速拉回初始姿态。新采集数据统一包含左右夹爪 action，shape 为 14，并保存 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三路图像；早期 `sync_gripper=false` 的 12D smoke 数据只能按旧设置回放，不能和新数据直接混用。
 
 多 episode 采集时，每段结束后从臂会回到 JSON 的 `joint_pos`，主臂会通过 leader command topic 回到 JSON 的 `leader_joint_pos`。如果主臂 command topic 没有 publisher/subscriber，先确认 `remote.sh` 启动的是本仓库更新后的 master 节点。
 
@@ -203,13 +284,13 @@ lerobot-record \
 
 ## 回放数据集
 
-纯动作回放不需要相机，且要和采集时的夹爪同步设置一致：
+纯动作回放不需要相机，且要和采集时的夹爪同步设置一致；新数据统一使用 `sync_gripper=true`：
 
 ```bash
 lerobot-replay \
   --robot.type=cobot_magic_ros_follower \
   --robot.id=cobot_magic_ros_follower_replay \
-  --robot.sync_gripper=false \
+  --robot.sync_gripper=true \
   --robot.cameras='{}' \
   --reset_to_zero_pose=true \
   --reset_before_replay=true \

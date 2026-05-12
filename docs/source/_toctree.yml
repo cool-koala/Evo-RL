@@ -33,6 +33,8 @@
 - sections:
   - local: act
     title: ACT
+  - local: diffusion
+    title: Diffusion Policy
   - local: smolvla
     title: SmolVLA
   - local: pi0
