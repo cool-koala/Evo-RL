@@ -32,7 +32,10 @@ from lerobot.scripts.lerobot_human_inloop_record import (
     _slow_reset_all_arms_to_pose,
     human_inloop_record,
 )
-from lerobot.scripts.lerobot_patch_hil_dataset_schema import PatchHilDatasetSchemaConfig, patch_hil_dataset_schema
+from lerobot.scripts.lerobot_patch_hil_dataset_schema import (
+    PatchHilDatasetSchemaConfig,
+    patch_hil_dataset_schema,
+)
 from lerobot.scripts.lerobot_record import (
     ACPInferenceConfig,
     DatasetRecordConfig,
@@ -242,7 +245,10 @@ def test_patch_hil_dataset_schema_restores_legacy_dataset_mergeability(tmp_path)
         output_repo_id="dummy/repo_merged",
         output_dir=merged_root,
     )
-    assert merged_dataset.meta.total_episodes == current_dataset.meta.total_episodes + patched_dataset.meta.total_episodes
+    assert (
+        merged_dataset.meta.total_episodes
+        == current_dataset.meta.total_episodes + patched_dataset.meta.total_episodes
+    )
 
 
 def test_record_loop_sets_leader_manual_control_during_reset():
@@ -404,6 +410,29 @@ def test_slow_reset_all_arms_to_pose_uses_interpolation():
     assert robot.send_action.call_count > 1
     teleop.set_manual_control.assert_called_once_with(False)
     teleop.send_feedback.assert_called()
+
+
+def test_slow_reset_all_arms_to_pose_prefers_unclipped_send_action():
+    robot = MockRobot(MockRobotConfig(n_motors=2, random_values=False, static_values=[0.0, 0.0]))
+    robot.connect()
+    clipped_send_action = MagicMock(return_value={"motor_1.pos": 999.0, "motor_2.pos": 999.0})
+    unclipped_send_action = MagicMock(return_value={"motor_1.pos": 1.0, "motor_2.pos": -1.0})
+    robot.send_action = clipped_send_action
+    robot.send_action_without_relative_limit = unclipped_send_action
+
+    try:
+        _slow_reset_all_arms_to_pose(
+            robot=robot,
+            teleop=None,
+            target_pose={"motor_1.pos": 1.0, "motor_2.pos": -1.0},
+            duration_s=0.05,
+        )
+    finally:
+        if robot.is_connected:
+            robot.disconnect()
+
+    unclipped_send_action.assert_called()
+    clipped_send_action.assert_not_called()
 
 
 def test_record_and_replay(tmp_path):

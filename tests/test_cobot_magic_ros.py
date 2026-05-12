@@ -275,7 +275,9 @@ def test_cobot_magic_ros_replay_zero_pose_uses_first_action():
 
 def test_cobot_magic_ros_robot_publishes_jointstate_and_reads_observation(monkeypatch):
     fake_rospy = install_fake_ros(monkeypatch)
-    robot = make_robot_from_config(CobotMagicRosFollowerConfig(id="ros_follower", cameras={}))
+    robot = make_robot_from_config(
+        CobotMagicRosFollowerConfig(id="ros_follower", cameras={}, max_relative_target=None)
+    )
     robot.connect()
     try:
         fake_rospy.subscribers["/cobot_magic/puppet/joint_left"][0].emit(
@@ -304,6 +306,62 @@ def test_cobot_magic_ros_robot_publishes_jointstate_and_reads_observation(monkey
         assert left_msg.position == pytest.approx([1, 2, 3, 4, 5, 6, 7])
         assert right_msg.position == pytest.approx([-1, -2, -3, -4, -5, -6, -7])
         assert sent["left_joint_1.pos"] == pytest.approx(1.0)
+    finally:
+        robot.disconnect()
+
+
+def test_cobot_magic_ros_robot_clips_large_relative_action(monkeypatch):
+    fake_rospy = install_fake_ros(monkeypatch)
+    robot = make_robot_from_config(
+        CobotMagicRosFollowerConfig(id="ros_follower", cameras={}, max_relative_target=0.05)
+    )
+    robot.connect()
+    try:
+        fake_rospy.subscribers["/cobot_magic/puppet/joint_left"][0].emit(make_joint_state([0.0] * 7))
+        fake_rospy.subscribers["/cobot_magic/puppet/joint_right"][0].emit(make_joint_state([1.0] * 7))
+
+        action = {
+            **{f"left_joint_{idx}.pos": 1.0 for idx in range(1, 7)},
+            "left_gripper.pos": 1.0,
+            **{f"right_joint_{idx}.pos": -1.0 for idx in range(1, 7)},
+            "right_gripper.pos": -1.0,
+        }
+        sent = robot.send_action(action)
+
+        left_msg = fake_rospy.publishers["/cobot_magic/command/joint_left"].published[-1]
+        right_msg = fake_rospy.publishers["/cobot_magic/command/joint_right"].published[-1]
+        assert left_msg.position == pytest.approx([0.05] * 7)
+        assert right_msg.position == pytest.approx([0.95] * 7)
+        assert sent["left_joint_1.pos"] == pytest.approx(0.05)
+        assert sent["right_gripper.pos"] == pytest.approx(0.95)
+    finally:
+        robot.disconnect()
+
+
+def test_cobot_magic_ros_robot_can_bypass_relative_clip_for_trusted_actions(monkeypatch):
+    fake_rospy = install_fake_ros(monkeypatch)
+    robot = make_robot_from_config(
+        CobotMagicRosFollowerConfig(id="ros_follower", cameras={}, max_relative_target=0.05)
+    )
+    robot.connect()
+    try:
+        fake_rospy.subscribers["/cobot_magic/puppet/joint_left"][0].emit(make_joint_state([0.0] * 7))
+        fake_rospy.subscribers["/cobot_magic/puppet/joint_right"][0].emit(make_joint_state([1.0] * 7))
+
+        action = {
+            **{f"left_joint_{idx}.pos": 1.0 for idx in range(1, 7)},
+            "left_gripper.pos": 1.0,
+            **{f"right_joint_{idx}.pos": -1.0 for idx in range(1, 7)},
+            "right_gripper.pos": -1.0,
+        }
+        sent = robot.send_action_without_relative_limit(action)
+
+        left_msg = fake_rospy.publishers["/cobot_magic/command/joint_left"].published[-1]
+        right_msg = fake_rospy.publishers["/cobot_magic/command/joint_right"].published[-1]
+        assert left_msg.position == pytest.approx([1.0] * 7)
+        assert right_msg.position == pytest.approx([-1.0] * 7)
+        assert sent["left_joint_1.pos"] == pytest.approx(1.0)
+        assert sent["right_gripper.pos"] == pytest.approx(-1.0)
     finally:
         robot.disconnect()
 
@@ -376,7 +434,9 @@ def test_cobot_magic_ros_leader_feedback_commands_and_manual_mode(monkeypatch):
 def test_cobot_magic_ros_startup_sync_aligns_to_absolute_leader(monkeypatch):
     fake_rospy = install_fake_ros(monkeypatch)
     robot = make_robot_from_config(
-        CobotMagicRosFollowerConfig(id="ros_follower", cameras={}, sync_gripper=False)
+        CobotMagicRosFollowerConfig(
+            id="ros_follower", cameras={}, sync_gripper=False, max_relative_target=None
+        )
     )
     teleop = make_teleoperator_from_config(
         CobotMagicRosLeaderConfig(
@@ -427,6 +487,52 @@ def test_cobot_magic_ros_startup_sync_aligns_to_absolute_leader(monkeypatch):
         action = teleop.get_action()
         assert action["left_joint_1.pos"] == pytest.approx(1.0)
         assert action["right_joint_6.pos"] == pytest.approx(-1.5)
+    finally:
+        teleop.disconnect()
+        robot.disconnect()
+
+
+def test_cobot_magic_ros_startup_sync_uses_joint_observation_without_camera(monkeypatch):
+    fake_rospy = install_fake_ros(monkeypatch)
+    robot = make_robot_from_config(
+        CobotMagicRosFollowerConfig(
+            id="ros_follower",
+            sync_gripper=False,
+            read_timeout_s=0.0,
+            max_relative_target=None,
+        )
+    )
+    teleop = make_teleoperator_from_config(
+        CobotMagicRosLeaderConfig(
+            id="ros_leader",
+            sync_gripper=False,
+            startup_sync=True,
+            startup_sync_duration_s=0.01,
+            startup_sync_max_joint_delta=None,
+        )
+    )
+    teleop.connect()
+    robot.connect()
+    try:
+        emit_topic(
+            fake_rospy,
+            "/cobot_magic/leader/joint_left",
+            make_joint_state([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.0]),
+        )
+        emit_topic(
+            fake_rospy,
+            "/cobot_magic/leader/joint_right",
+            make_joint_state([-0.1, -0.2, -0.3, -0.4, -0.5, -0.6, 0.0]),
+        )
+        emit_topic(fake_rospy, "/cobot_magic/puppet/joint_left", make_joint_state([0.0] * 7))
+        emit_topic(fake_rospy, "/cobot_magic/puppet/joint_right", make_joint_state([0.0] * 7))
+
+        _run_startup_sync_if_requested(robot, teleop, fps=100)
+
+        left_msg = fake_rospy.publishers["/cobot_magic/command/joint_left"].published[-1]
+        right_msg = fake_rospy.publishers["/cobot_magic/command/joint_right"].published[-1]
+        assert left_msg.position[:6] == pytest.approx([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+        assert right_msg.position[:6] == pytest.approx([-0.1, -0.2, -0.3, -0.4, -0.5, -0.6])
     finally:
         teleop.disconnect()
         robot.disconnect()

@@ -391,10 +391,7 @@ def _record_zero_pose_path(cfg: RecordConfig) -> Path | None:
 
 def _prepare_record_reset_pose(cfg: RecordConfig, robot) -> dict[str, float] | None:
     if not (
-        cfg.reset_to_zero_pose
-        or cfg.capture_reset_pose
-        or cfg.reset_before_record
-        or cfg.reset_after_episode
+        cfg.reset_to_zero_pose or cfg.capture_reset_pose or cfg.reset_before_record or cfg.reset_after_episode
     ):
         return None
 
@@ -536,6 +533,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     dataset = None
     listener = None
     policy_sync_executor = None
+    reset_pose = None
+    leader_reset_pose = None
+    final_reset_done = False
 
     try:
         if cfg.resume:
@@ -637,9 +637,13 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         reset_pose=reset_pose,
                         leader_reset_pose=leader_reset_pose,
                     )
+                    final_reset_done = True
+                else:
+                    final_reset_done = False
                 _assert_teleop_matches_reset_pose_if_required(cfg=cfg, teleop=teleop, reset_pose=reset_pose)
                 _run_record_startup_sync_if_requested(cfg, robot, teleop)
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+                final_reset_done = False
                 record_loop(
                     robot=robot,
                     events=events,
@@ -694,6 +698,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         reset_pose=reset_pose,
                         leader_reset_pose=leader_reset_pose,
                     )
+                    final_reset_done = True
 
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
@@ -746,11 +751,23 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
+        if cfg.reset_after_episode and reset_pose is not None and not final_reset_done and robot.is_connected:
+            try:
+                logging.info("Running final reset before disconnect.")
+                _slow_reset_if_requested(
+                    cfg=cfg,
+                    robot=robot,
+                    teleop=teleop,
+                    reset_pose=reset_pose,
+                    leader_reset_pose=leader_reset_pose,
+                )
+            except Exception:
+                logging.exception("Final reset before disconnect failed.")
+
         if dataset:
             dataset.finalize()
             logging.info(
-                "To inspect the recorded dataset, run:\n"
-                "  lerobot-dataset-report --dataset %s",
+                "To inspect the recorded dataset, run:\n  lerobot-dataset-report --dataset %s",
                 dataset.repo_id,
             )
 

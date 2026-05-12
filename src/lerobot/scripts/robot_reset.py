@@ -149,9 +149,7 @@ def slow_reset_all_arms_to_pose(
         feedback_feature_keys = list(feedback_features) if hasattr(feedback_features, "keys") else []
         candidate_keys = feedback_feature_keys or list(teleop_target_pose)
         teleop_joint_keys = [
-            key
-            for key in candidate_keys
-            if key.endswith(".pos") and key in current_teleop_pose
+            key for key in candidate_keys if key.endswith(".pos") and key in current_teleop_pose
         ]
         teleop_start_pose = {
             key: float(current_teleop_pose.get(key, teleop_target_pose.get(key, current_teleop_pose[key])))
@@ -164,12 +162,13 @@ def slow_reset_all_arms_to_pose(
     steps = max(int(duration_s * fps), 1)
     step_dt_s = duration_s / steps
     logging.info("Returning robot to reset pose over %.2fs.", duration_s)
+    send_action = getattr(robot, "send_action_without_relative_limit", robot.send_action)
     for idx in range(1, steps + 1):
         alpha = idx / steps
         action: RobotAction = {
             key: start_pose[key] + (goal_pose[key] - start_pose[key]) * alpha for key in joint_keys
         }
-        sent_action = robot.send_action(action)
+        sent_action = send_action(action)
         if teleop is not None and not isinstance(teleop, list) and hasattr(teleop, "send_feedback"):
             if teleop_joint_keys:
                 teleop_action: RobotAction = {

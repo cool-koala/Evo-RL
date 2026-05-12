@@ -119,6 +119,7 @@ def build_ros_joint_positions(
     *,
     current_state: Any | None,
     sync_gripper: bool,
+    max_relative_target: float | None = None,
 ) -> tuple[list[float], RobotAction]:
     """Convert LeRobot action keys into a ROS JointState position vector."""
 
@@ -130,7 +131,12 @@ def build_ros_joint_positions(
         if prefixed_key not in action:
             missing.append(prefixed_key)
             continue
-        value = float(action[prefixed_key])
+        value = _clip_relative_target(
+            float(action[prefixed_key]),
+            current_state=current_state,
+            index=len(positions),
+            max_relative_target=max_relative_target,
+        )
         positions.append(value)
         sent[prefixed_key] = value
 
@@ -141,12 +147,31 @@ def build_ros_joint_positions(
     if sync_gripper:
         if gripper_key not in action:
             raise KeyError(f"Cobot Magic ROS action is missing required gripper key: {gripper_key}")
-        gripper_pos = float(action[gripper_key])
+        gripper_pos = _clip_relative_target(
+            float(action[gripper_key]),
+            current_state=current_state,
+            index=6,
+            max_relative_target=max_relative_target,
+        )
         sent[gripper_key] = gripper_pos
     else:
         gripper_pos = _read_sequence_value(getattr(current_state, "position", None), 6)
     positions.append(gripper_pos)
     return positions, sent
+
+
+def _clip_relative_target(
+    value: float,
+    *,
+    current_state: Any | None,
+    index: int,
+    max_relative_target: float | None,
+) -> float:
+    if max_relative_target is None or current_state is None:
+        return value
+    current_position = getattr(current_state, "position", None)
+    current_value = _read_sequence_value(current_position, index, default=value)
+    return float(np.clip(value, current_value - max_relative_target, current_value + max_relative_target))
 
 
 def make_joint_state_message(ros: RosImports, positions: list[float]) -> Any:

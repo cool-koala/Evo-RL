@@ -65,13 +65,16 @@ def _get_joint_only_observation(robot: Robot) -> RobotObservation:
 def _make_hold_action(robot: Robot) -> RobotAction:
     obs = _get_joint_only_observation(robot)
     hold_action = {
-        key: float(obs[key])
-        for key in robot.action_features
-        if key.endswith(".pos") and key in obs
+        key: float(obs[key]) for key in robot.action_features if key.endswith(".pos") and key in obs
     }
     if not hold_action:
         raise RuntimeError("Cannot hold robot for HIL transition: no matching '.pos' action keys found.")
     return hold_action
+
+
+def _send_manual_or_interpolated_action(robot: Robot, action: RobotAction) -> RobotAction:
+    send_action = getattr(robot, "send_action_without_relative_limit", robot.send_action)
+    return send_action(action)
 
 
 def _move_teleop_to_action_while_holding_robot(
@@ -96,9 +99,7 @@ def _move_teleop_to_action_while_holding_robot(
     feedback_features = getattr(teleop, "feedback_features", {})
     feedback_feature_keys = list(feedback_features) if hasattr(feedback_features, "keys") else []
     candidate_keys = feedback_feature_keys or list(target_action)
-    joint_keys = [
-        key for key in candidate_keys if key.endswith(".pos") and key in start_action
-    ]
+    joint_keys = [key for key in candidate_keys if key.endswith(".pos") and key in start_action]
     if not joint_keys:
         raise RuntimeError("Parked HIL leader transition has no matching joint position keys.")
 
@@ -112,7 +113,7 @@ def _move_teleop_to_action_while_holding_robot(
             for key in joint_keys
         }
         teleop.send_feedback(feedback_action)
-        robot.send_action(hold_action)
+        _send_manual_or_interpolated_action(robot, hold_action)
         precise_sleep(step_dt_s)
 
 
@@ -501,11 +502,21 @@ def record_loop(
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
         selected_from_policy = act_processed_policy is not None and action_values is act_processed_policy
+        selected_from_teleop = (
+            act_processed_teleop is not None and action_values is act_processed_teleop
+        ) or (last_teleop_action is not None and action_values is last_teleop_action)
         if policy_sync_executor is not None and selected_from_policy:
             _sent_action = run_with_connection_retry(
                 "policy_sync_executor.send_action",
                 lambda robot_action_to_send=robot_action_to_send: policy_sync_executor.send_action(
                     robot_action_to_send
+                ),
+            )
+        elif selected_from_teleop:
+            _sent_action = run_with_connection_retry(
+                "robot.send_action_without_relative_limit",
+                lambda robot_action_to_send=robot_action_to_send: _send_manual_or_interpolated_action(
+                    robot, robot_action_to_send
                 ),
             )
         else:
