@@ -53,6 +53,9 @@ class _CobotMagicLeaderArm(_CobotMagicArm):
     def get_action(self) -> RobotAction:
         # 读取真实关节反馈，确保人工拖动时 action 跟随实际 leader 姿态。
         action = self._current_action()
+        if self._manual_control_enabled:
+            # set_to_damping() 会把 kp 置零；持续发送当前状态让 SDK 后台循环输出阻尼和重力补偿。
+            self.send_current_action(action)
         if not self.config.sync_gripper:
             # 不同步夹爪时直接省略夹爪 key，follower 会保持自己的当前夹爪位置。
             action.pop(ARX5_GRIPPER_KEY, None)

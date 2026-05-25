@@ -34,6 +34,24 @@ class FakeLogLevel:
     OFF = "OFF"
 
 
+class FakeGain:
+    def __init__(self, dof_or_kp, kd=None, gripper_kp=0.0, gripper_kd=0.0):
+        if isinstance(dof_or_kp, int):
+            self._kp = np.zeros(dof_or_kp, dtype=np.float64)
+            self._kd = np.zeros(dof_or_kp, dtype=np.float64)
+        else:
+            self._kp = np.asarray(dof_or_kp, dtype=np.float64).copy()
+            self._kd = np.asarray(kd, dtype=np.float64).copy()
+        self.gripper_kp = float(gripper_kp)
+        self.gripper_kd = float(gripper_kd)
+
+    def kp(self):
+        return self._kp
+
+    def kd(self):
+        return self._kd
+
+
 class FakeRobotConfig:
     def __init__(self, model: str):
         self.robot_model = model
@@ -43,11 +61,16 @@ class FakeRobotConfig:
         self.joint_vel_max = np.array([2.0] * 6)
         self.joint_torque_max = np.array([15.0] * 6)
         self.gripper_width = 0.08
+        self.gravity_vector = np.array([0.0, 0.0, -9.807])
 
 
 class FakeControllerConfig:
     def __init__(self):
         self.controller_type = "joint_controller"
+        self.default_kp = np.array([80.0, 70.0, 70.0, 30.0, 30.0, 20.0])
+        self.default_kd = np.array([2.0, 2.0, 2.0, 1.0, 1.0, 0.7])
+        self.default_gripper_kp = 5.0
+        self.default_gripper_kd = 0.2
         self.controller_dt = 0.002
         self.gravity_compensation = False
         self.background_send_recv = False
@@ -117,6 +140,12 @@ class FakeArx5JointController:
         self.send_recv_calls = 0
         self.recv_calls = 0
         self.last_cmd = None
+        self.gain = FakeGain(
+            np.zeros(6),
+            self.controller_config.default_kd,
+            0.0,
+            0.0,
+        )
         self.state = FakeJointState(
             np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
             np.array([0.01, 0.02, 0.03, 0.04, 0.05, 0.06]),
@@ -148,11 +177,23 @@ class FakeArx5JointController:
     def get_controller_config(self):
         return self.controller_config
 
+    def set_gain(self, gain):
+        self.gain = gain
+
+    def get_gain(self):
+        return self.gain
+
     def reset_to_home(self):
         self.home_calls += 1
 
     def set_to_damping(self):
         self.damping_calls += 1
+        self.gain = FakeGain(
+            np.zeros(6),
+            self.controller_config.default_kd,
+            0.0,
+            0.0,
+        )
 
     def set_log_level(self, level):
         self.log_level = level
@@ -162,6 +203,7 @@ def install_fake_arx5(monkeypatch):
     fake_module = SimpleNamespace(
         Arx5JointController=FakeArx5JointController,
         ControllerConfigFactory=FakeControllerConfigFactory,
+        Gain=FakeGain,
         JointState=FakeJointState,
         LogLevel=FakeLogLevel,
         RobotConfigFactory=FakeRobotConfigFactory,
@@ -197,9 +239,14 @@ def make_leader_config(**kwargs) -> CobotMagicLeaderConfig:
 def test_cobot_magic_parse_teleoperate_config():
     args = [
         "--robot.type=cobot_magic_follower",
+        "--robot.left_arm_config.model=X5",
+        "--robot.right_arm_config.model=X5",
         "--robot.left_arm_config.interface=can0",
         "--robot.right_arm_config.interface=can1",
+        "--robot.left_arm_config.relative_target_mode=true",
         "--teleop.type=cobot_magic_leader",
+        "--teleop.left_arm_config.model=X5",
+        "--teleop.right_arm_config.model=X5",
         "--teleop.left_arm_config.interface=can2",
         "--teleop.right_arm_config.interface=can3",
     ]
@@ -209,6 +256,7 @@ def test_cobot_magic_parse_teleoperate_config():
     assert cfg.robot.type == "cobot_magic_follower"
     assert cfg.teleop.type == "cobot_magic_leader"
     assert cfg.robot.left_arm_config.model == "X5"
+    assert cfg.robot.left_arm_config.relative_target_mode is True
     assert cfg.teleop.left_arm_config.gravity_compensation is True
 
 
@@ -254,6 +302,8 @@ def test_cobot_magic_leader_manual_mode_enables_damping_and_gravity_comp(monkeyp
         action = teleop.get_action()
         assert action["left_joint_1.pos"] == pytest.approx(0.1)
         assert action["right_gripper.pos"] == pytest.approx(0.03)
+        assert teleop.left_arm.controller.last_cmd.pos()[0] == pytest.approx(0.1)
+        assert teleop.right_arm.controller.last_cmd.gripper_pos == pytest.approx(0.03)
     finally:
         teleop.disconnect()
 
@@ -270,6 +320,8 @@ def test_cobot_magic_follower_clamps_and_sends_full_joint_state(monkeypatch):
     robot.connect()
     try:
         assert "left_gripper.pos" in robot.action_features
+        assert robot.left_arm.controller.gain.kp()[0] == pytest.approx(80.0)
+        assert robot.right_arm.controller.gain.gripper_kp == pytest.approx(5.0)
         action = {
             "left_joint_1.pos": 1.0,
             "left_joint_2.pos": 1.0,
@@ -327,6 +379,56 @@ def test_cobot_magic_follower_sync_gripper_false_holds_current_gripper(monkeypat
 
         assert robot.left_arm.controller.last_cmd.gripper_pos == pytest.approx(0.03)
         assert robot.right_arm.controller.last_cmd.gripper_pos == pytest.approx(0.03)
+    finally:
+        robot.disconnect()
+
+
+def test_cobot_magic_follower_relative_target_mode_tracks_leader_delta(monkeypatch):
+    install_fake_arx5(monkeypatch)
+
+    robot = make_robot_from_config(
+        make_robot_config(
+            left_arm_config=make_arm(
+                "can0",
+                max_relative_target=1.0,
+                relative_target_mode=True,
+                sync_gripper=False,
+            ),
+            right_arm_config=make_arm(
+                "can1",
+                max_relative_target=1.0,
+                relative_target_mode=True,
+                sync_gripper=False,
+            ),
+        )
+    )
+    robot.connect()
+    try:
+        initial_action = {
+            "left_joint_1.pos": 1.0,
+            "left_joint_2.pos": 1.0,
+            "left_joint_3.pos": 1.0,
+            "left_joint_4.pos": 1.0,
+            "left_joint_5.pos": 1.0,
+            "left_joint_6.pos": 1.0,
+            "right_joint_1.pos": -1.0,
+            "right_joint_2.pos": -1.0,
+            "right_joint_3.pos": -1.0,
+            "right_joint_4.pos": -1.0,
+            "right_joint_5.pos": -1.0,
+            "right_joint_6.pos": -1.0,
+        }
+        sent = robot.send_action(initial_action)
+        assert sent["left_joint_1.pos"] == pytest.approx(0.1)
+        assert sent["right_joint_6.pos"] == pytest.approx(0.6)
+
+        moved_action = dict(initial_action)
+        moved_action["left_joint_1.pos"] = 1.2
+        moved_action["right_joint_6.pos"] = -0.7
+        sent = robot.send_action(moved_action)
+
+        assert sent["left_joint_1.pos"] == pytest.approx(0.3)
+        assert sent["right_joint_6.pos"] == pytest.approx(0.9)
     finally:
         robot.disconnect()
 

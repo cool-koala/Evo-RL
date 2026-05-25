@@ -76,6 +76,7 @@ from lerobot.robots import (  # noqa: F401
     bi_piper_follower,
     bi_so_follower,
     cobot_magic,
+    cobot_magic_ros,
     earthrover_mini_plus,
     hope_jr,
     koch_follower,
@@ -94,6 +95,7 @@ from lerobot.teleoperators import (  # noqa: F401
     bi_piper_leader,
     bi_so_leader,
     cobot_magic as cobot_magic_leader,
+    cobot_magic_ros as cobot_magic_ros_leader,
     gamepad,
     homunculus,
     keyboard,
@@ -111,7 +113,6 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-
 
 LOOP_STATUS_INTERVAL_S = 0.5
 
@@ -159,6 +160,72 @@ def _configure_robot_for_lightweight_teleop(
     if should_fetch_obs:
         return
     robot.set_teleop_send_only_mode(True)
+
+
+def _slow_startup_sync_robot_to_teleop(
+    robot: Robot,
+    teleop: Teleoperator,
+    *,
+    duration_s: float,
+    fps: int,
+    max_joint_delta: float | None,
+) -> None:
+    """Slowly move the robot from its current pose to the teleop's absolute pose."""
+
+    if hasattr(teleop, "set_manual_control"):
+        teleop.set_manual_control(False)
+
+    target_action = (
+        teleop.get_absolute_action() if hasattr(teleop, "get_absolute_action") else teleop.get_action()
+    )
+    get_joint_observation = getattr(robot, "get_joint_observation", None)
+    current_obs = get_joint_observation() if callable(get_joint_observation) else robot.get_observation()
+    joint_keys = [
+        key
+        for key in robot.action_features
+        if key.endswith(".pos") and key in target_action and key in current_obs
+    ]
+    if not joint_keys:
+        raise RuntimeError("Startup sync requested, but no matching joint position keys were found.")
+
+    start_pose = {key: float(current_obs[key]) for key in joint_keys}
+    target_pose = {key: float(target_action[key]) for key in joint_keys}
+    if max_joint_delta is not None:
+        arm_joint_keys = [key for key in joint_keys if "_joint_" in key]
+        max_delta = max(abs(target_pose[key] - start_pose[key]) for key in arm_joint_keys)
+        if max_delta > max_joint_delta:
+            raise RuntimeError(
+                "Startup sync target is too far from the current follower pose "
+                f"({max_delta:.3f} rad > {max_joint_delta:.3f} rad). "
+                "Manually place the arms closer together or increase `startup_sync_max_joint_delta`."
+            )
+
+    steps = max(int(duration_s * fps), 1)
+    step_dt_s = duration_s / steps
+    logging.info("Synchronizing follower to leader pose over %.2fs before teleoperation.", duration_s)
+    for idx in range(1, steps + 1):
+        alpha = idx / steps
+        action = {key: start_pose[key] + (target_pose[key] - start_pose[key]) * alpha for key in joint_keys}
+        sent_action = robot.send_action(action)
+        if hasattr(teleop, "send_feedback"):
+            teleop.send_feedback(sent_action)
+        time.sleep(step_dt_s)
+
+    time.sleep(min(0.2, step_dt_s))
+    if getattr(teleop.config, "manual_control", False) and hasattr(teleop, "set_manual_control"):
+        teleop.set_manual_control(True)
+
+
+def _run_startup_sync_if_requested(robot: Robot, teleop: Teleoperator, fps: int) -> None:
+    if not getattr(teleop.config, "startup_sync", False):
+        return
+    _slow_startup_sync_robot_to_teleop(
+        robot,
+        teleop,
+        duration_s=float(getattr(teleop.config, "startup_sync_duration_s", 3.0)),
+        fps=fps,
+        max_joint_delta=getattr(teleop.config, "startup_sync_max_joint_delta", None),
+    )
 
 
 def teleop_loop(
@@ -272,6 +339,7 @@ def teleoperate(cfg: TeleoperateConfig):
     try:
         teleop.connect()
         robot.connect()
+        _run_startup_sync_if_requested(robot, teleop, cfg.fps)
         teleop_loop(
             teleop=teleop,
             robot=robot,

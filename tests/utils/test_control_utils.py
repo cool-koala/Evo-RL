@@ -11,6 +11,7 @@ from lerobot.utils.control_utils import sanity_check_bimanual_piper_pair
         ("bi_piper_follower", "bi_piper_leader"),
         ("bi_piperx_follower", "bi_piperx_leader"),
         ("cobot_magic_follower", "cobot_magic_leader"),
+        ("cobot_magic_ros_follower", "cobot_magic_ros_leader"),
         ("so101_follower", "so101_leader"),
     ],
 )
@@ -47,6 +48,8 @@ def test_sanity_check_cobot_magic_rejects_shared_leader_follower_interface():
         ("bi_piper_follower", "bi_piperx_leader"),
         ("bi_piperx_follower", "bi_piper_leader"),
         ("cobot_magic_follower", "bi_piper_leader"),
+        ("cobot_magic_ros_follower", "cobot_magic_leader"),
+        ("cobot_magic_follower", "cobot_magic_ros_leader"),
         ("bi_piperx_follower", "cobot_magic_leader"),
         ("so101_follower", "bi_piperx_leader"),
         ("so101_follower", "bi_piper_leader"),

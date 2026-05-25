@@ -23,11 +23,13 @@ from lerobot.policies.factory import make_policy
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
     cobot_magic,
+    cobot_magic_ros,
     make_robot_from_config,
     so_follower,
 )
 from lerobot.teleoperators import (
     cobot_magic as cobot_magic_leader,  # noqa: F401
+    cobot_magic_ros as cobot_magic_ros_leader,  # noqa: F401
     gamepad,  # noqa: F401
     so_leader,  # noqa: F401
 )

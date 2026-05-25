@@ -80,6 +80,10 @@ def make_robot_from_config(config: RobotConfig) -> Robot:
         from .cobot_magic import CobotMagicFollower
 
         return CobotMagicFollower(config)
+    elif config.type == "cobot_magic_ros_follower":
+        from .cobot_magic_ros import CobotMagicRosFollower
+
+        return CobotMagicRosFollower(config)
     elif config.type == "bi_openarm_follower":
         from .bi_openarm_follower import BiOpenArmFollower
 

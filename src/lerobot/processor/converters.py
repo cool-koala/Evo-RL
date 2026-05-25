@@ -212,7 +212,7 @@ def create_transition(
 
 
 def robot_action_observation_to_transition(
-    action_observation: tuple[RobotAction, RobotObservation],
+    action_observation: RobotAction | tuple[RobotAction, RobotObservation],
 ) -> EnvTransition:
     """
     Convert a raw robot action and observation dictionary into a standardized `EnvTransition`.
@@ -224,10 +224,13 @@ def robot_action_observation_to_transition(
     Returns:
         An `EnvTransition` containing the formatted observation.
     """
-    if not isinstance(action_observation, tuple):
-        raise ValueError("action_observation should be a tuple type with an action and observation")
-
-    action, observation = action_observation
+    if isinstance(action_observation, dict):
+        action = action_observation
+        observation = None
+    elif isinstance(action_observation, tuple):
+        action, observation = action_observation
+    else:
+        raise ValueError("action_observation should be a RobotAction or a tuple with an action and observation")
 
     if action is not None and not isinstance(action, dict):
         raise ValueError(f"Action should be a RobotAction type got {type(action)}")
