@@ -79,7 +79,7 @@ htmlcov/
 .nox/
 .coverage
 .coverage.*
-nosetests.xml
+nosetests.xmlf
 coverage.xml
 *.cover
 *.py,cover

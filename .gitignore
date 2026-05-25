@@ -22,7 +22,6 @@ venv.bak/
 .python-version
 __pypackages__/
 node_modules/
-
 # Lock files
 poetry.lock
 uv.lock
