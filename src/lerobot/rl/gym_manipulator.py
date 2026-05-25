@@ -54,7 +54,6 @@ from lerobot.processor.converters import identity_transition
 from lerobot.robots import (  # noqa: F401
     RobotConfig,
     cobot_magic,
-    cobot_magic_ros,
     make_robot_from_config,
     so_follower,
 )
@@ -68,7 +67,6 @@ from lerobot.robots.so_follower.robot_kinematic_processor import (
 )
 from lerobot.teleoperators import (
     cobot_magic as cobot_magic_leader,  # noqa: F401
-    cobot_magic_ros as cobot_magic_ros_leader,  # noqa: F401
     gamepad,  # noqa: F401
     keyboard,  # noqa: F401
     make_teleoperator_from_config,

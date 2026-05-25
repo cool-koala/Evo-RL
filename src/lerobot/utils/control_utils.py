@@ -407,7 +407,6 @@ def sanity_check_bimanual_piper_pair(robot_cfg, teleop_cfg) -> None:
         "bi_piper_follower": "bi_piper_leader",
         "bi_piperx_follower": "bi_piperx_leader",
         "cobot_magic_follower": "cobot_magic_leader",
-        "cobot_magic_ros_follower": "cobot_magic_ros_leader",
     }
     expected_robot_by_teleop = {teleop: robot for robot, teleop in expected_teleop_by_robot.items()}
 
@@ -429,15 +428,11 @@ def sanity_check_bimanual_piper_pair(robot_cfg, teleop_cfg) -> None:
 def _sanity_check_cobot_magic_interfaces(robot_cfg, teleop_cfg) -> None:
     """Ensure Cobot Magic follower and leader do not share a hardware interface."""
 
-    def get_interface(config, arm_config_name: str) -> str | None:
-        arm_config = getattr(config, arm_config_name, None)
-        return getattr(arm_config, "interface", None)
-
     interface_entries = [
-        ("follower left", get_interface(robot_cfg, "left_arm_config")),
-        ("follower right", get_interface(robot_cfg, "right_arm_config")),
-        ("leader left", get_interface(teleop_cfg, "left_arm_config")),
-        ("leader right", get_interface(teleop_cfg, "right_arm_config")),
+        ("follower left", getattr(robot_cfg.left_arm_config, "interface", None)),
+        ("follower right", getattr(robot_cfg.right_arm_config, "interface", None)),
+        ("leader left", getattr(teleop_cfg.left_arm_config, "interface", None)),
+        ("leader right", getattr(teleop_cfg.right_arm_config, "interface", None)),
     ]
     seen: dict[str, str] = {}
     duplicates: list[str] = []

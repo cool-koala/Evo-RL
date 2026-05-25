@@ -51,9 +51,7 @@ class CobotMagicArmConfig:
     # SDK 日志级别，对应 arx5_interface.LogLevel。
     log_level: str = "WARNING"
     # 上层相对位移限幅，防止 policy 或 teleop 一帧内发送过大的目标跳变。
-    max_relative_target: float | dict[str, float] | None = 0.25
-    # 主从示教时可使用相对目标：从臂保持自己的启动姿态，只跟随主臂启动后的关节增量。
-    relative_target_mode: bool = False
+    max_relative_target: float | dict[str, float] = 0.25
     # 是否同步夹爪；关闭后只控制 6 个手臂关节。
     sync_gripper: bool = True
     # 连接时是否回 home。真实机器人上自动回零可能有风险，所以默认关闭。
@@ -62,8 +60,6 @@ class CobotMagicArmConfig:
     set_damping_on_disconnect: bool = True
     # SDK 是否在对象析构时切 passive；不同版本字段可能存在，设置时做兼容检查。
     shutdown_to_passive: bool = True
-    # 机械臂底座不是标准竖直安装时，需要覆盖 SDK 的重力方向，例如 [0, 9.807, 0]。
-    gravity_vector: tuple[float, float, float] | None = None
 
 
 def get_arx5_sdk() -> ModuleType:
@@ -89,9 +85,7 @@ def validate_cobot_magic_arm_config(config: CobotMagicArmConfig) -> None:
         raise ValueError("Cobot Magic currently supports only `controller_type='joint_controller'`.")
     if config.controller_dt is not None and config.controller_dt <= 0:
         raise ValueError("`controller_dt` must be > 0 when provided.")
-    if config.max_relative_target is None:
-        pass
-    elif isinstance(config.max_relative_target, int | float):
+    if isinstance(config.max_relative_target, int | float):
         if config.max_relative_target <= 0:
             raise ValueError("`max_relative_target` must be > 0.")
     elif isinstance(config.max_relative_target, dict):
@@ -102,8 +96,6 @@ def validate_cobot_magic_arm_config(config: CobotMagicArmConfig) -> None:
             raise ValueError("All `max_relative_target` values must be > 0.")
     else:
         raise TypeError("`max_relative_target` must be a positive number or a dict of positive numbers.")
-    if config.gravity_vector is not None and len(config.gravity_vector) != 3:
-        raise ValueError("`gravity_vector` must contain exactly three values.")
 
 
 def make_arx5_joint_controller(config: CobotMagicArmConfig) -> Any:
@@ -113,8 +105,6 @@ def make_arx5_joint_controller(config: CobotMagicArmConfig) -> Any:
 
     # 先拿 SDK 的默认 robot/controller config，再覆盖 EvoRL 暴露出的安全相关字段。
     robot_config = arx5.RobotConfigFactory.get_instance().get_config(config.model)
-    if config.gravity_vector is not None:
-        robot_config.gravity_vector = np.asarray(config.gravity_vector, dtype=np.float64)
     controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
         config.controller_type,
         robot_config.joint_dof,

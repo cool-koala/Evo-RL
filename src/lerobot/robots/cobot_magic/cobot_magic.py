@@ -51,8 +51,6 @@ class _CobotMagicArm:
         self._is_connected = False
         self._arx5 = None
         self._joint_dof = 6
-        self._relative_action_origin: RobotAction | None = None
-        self._relative_target_origin: RobotAction | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -93,17 +91,6 @@ class _CobotMagicArm:
         # ARX SDK 的核心配置在 controller 创建前写入 ControllerConfig，这里保留接口对齐 Robot API。
         return
 
-    def set_to_position_control(self) -> None:
-        controller = self._require_controller()
-        controller_config = controller.get_controller_config()
-        gain = self._arx5.Gain(
-            controller_config.default_kp,
-            controller_config.default_kd,
-            controller_config.default_gripper_kp,
-            controller_config.default_gripper_kd,
-        )
-        controller.set_gain(gain)
-
     @property
     def is_calibrated(self) -> bool:
         # ARX SDK 自带标定/限位配置；EvoRL 不在连接流程里自动写电机标定，避免误操作。
@@ -142,21 +129,8 @@ class _CobotMagicArm:
         if has_any_joint and not has_all_joints:
             logger.warning("Ignoring partial Cobot Magic joint action; all six joint keys are required.")
         elif has_all_joints:
-            if self.config.relative_target_mode:
-                if self._relative_action_origin is None or self._relative_target_origin is None:
-                    self._relative_action_origin = {
-                        key: float(action[key]) for key in ARX5_JOINT_ACTION_KEYS
-                    }
-                    self._relative_target_origin = {key: current[key] for key in ARX5_JOINT_ACTION_KEYS}
-                for key in ARX5_JOINT_ACTION_KEYS:
-                    target[key] = (
-                        self._relative_target_origin[key]
-                        + float(action[key])
-                        - self._relative_action_origin[key]
-                    )
-            else:
-                for key in ARX5_JOINT_ACTION_KEYS:
-                    target[key] = float(action[key])
+            for key in ARX5_JOINT_ACTION_KEYS:
+                target[key] = float(action[key])
 
         if self.config.sync_gripper and ARX5_GRIPPER_KEY in action:
             target[ARX5_GRIPPER_KEY] = float(action[ARX5_GRIPPER_KEY])
@@ -164,13 +138,10 @@ class _CobotMagicArm:
         # 用当前状态做相对限幅，防止一次 send_action 把真实机械臂拉到很远的位置。
         safety_keys = ARX5_ACTION_KEYS if self.config.sync_gripper else ARX5_JOINT_ACTION_KEYS
         goal_present = {key: (target[key], current[key]) for key in safety_keys}
-        if self.config.max_relative_target is None:
-            safe_action = {key: target[key] for key in safety_keys}
-        else:
-            max_relative_target = self.config.max_relative_target
-            if not isinstance(max_relative_target, dict):
-                max_relative_target = float(max_relative_target)
-            safe_action = ensure_safe_goal_position(goal_present, max_relative_target)
+        max_relative_target = self.config.max_relative_target
+        if not isinstance(max_relative_target, dict):
+            max_relative_target = float(max_relative_target)
+        safe_action = ensure_safe_goal_position(goal_present, max_relative_target)
         if not self.config.sync_gripper:
             # 夹爪不同步时不对外暴露 gripper action，但底层 JointState 仍要填当前位置来保持夹爪。
             safe_action[ARX5_GRIPPER_KEY] = current[ARX5_GRIPPER_KEY]
@@ -185,13 +156,6 @@ class _CobotMagicArm:
             controller.send_recv_once()
         return safe_action
 
-    def send_current_action(self, action: RobotAction) -> None:
-        controller = self._require_controller()
-        cmd = make_arx5_joint_state(self._arx5, self._joint_dof, action)
-        controller.set_joint_cmd(cmd)
-        if not self.config.background_send_recv:
-            controller.send_recv_once()
-
     def set_to_damping(self) -> None:
         if self.controller is not None:
             self.controller.set_to_damping()
@@ -205,8 +169,6 @@ class _CobotMagicArm:
             self.controller = None
             self._arx5 = None
             self._is_connected = False
-            self._relative_action_origin = None
-            self._relative_target_origin = None
 
 
 class CobotMagicFollower(Robot):
@@ -290,8 +252,8 @@ class CobotMagicFollower(Robot):
         self.right_arm.calibrate()
 
     def configure(self) -> None:
-        self.left_arm.set_to_position_control()
-        self.right_arm.set_to_position_control()
+        self.left_arm.configure()
+        self.right_arm.configure()
 
     def setup_motors(self) -> None:
         raise NotImplementedError("Cobot Magic motor setup is handled by the ARX SDK and hardware tools.")
