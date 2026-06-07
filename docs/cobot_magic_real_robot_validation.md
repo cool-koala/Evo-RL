@@ -341,7 +341,80 @@ lerobot-replay \
 
 通过标准：从臂动作方向和幅度与采集一致；退出后无高刚度保持或异常拖拽感。
 
-## 7. 真机 RL / Human-in-loop Rollout
+## 7. Diffusion Policy 训练：只使用成功 episode
+
+Diffusion Policy 训练会自动使用数据集的 `meta/stats.json` 做归一化。正式训练不要只在
+`lerobot-train` 里临时传 `--dataset.episodes=[...]`，因为这样样本被过滤了，但归一化 stats
+仍来自原始全量数据集。推荐先物化一份按 episode 标签过滤后的派生数据集，让训练样本和
+`meta/stats.json` 都来自同一批 episode。
+
+下面命令从正式采集数据中筛选 `episode_success=success`，生成 success-only 派生数据集。
+默认视频使用 symlink 复用原始 mp4，所以原始数据集目录不能删除；如果要单独搬走派生数据集，
+把 `--video-mode symlink` 改成 `--video-mode copy`。
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate lerobot
+
+TASK_ID=cobot_magic_cube_into_drawer_v1
+
+python scripts/lerobot_materialize_episode_filter.py \
+  --source-root data/${TASK_ID}/lerobot \
+  --output-root data/${TASK_ID}_success_only/lerobot \
+  --metadata-key episode_success \
+  --metadata-value success \
+  --video-mode symlink \
+  --overwrite
+```
+
+生成后检查 episode 数、帧数和 stats count。`action` 和 `observation.state` 的 `count`
+应等于成功 episode 的总帧数：
+
+```bash
+python - <<'PY'
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+task_id = "cobot_magic_cube_into_drawer_v1"
+root = f"data/{task_id}_success_only/lerobot"
+dataset = LeRobotDataset(repo_id=f"local/{task_id}_success_only", root=root)
+print("episodes", dataset.meta.total_episodes)
+print("frames", dataset.meta.total_frames)
+print("action count", dataset.meta.stats["action"]["count"])
+print("state count", dataset.meta.stats["observation.state"]["count"])
+PY
+```
+
+训练时直接指向派生数据集，不再传 `--dataset.episodes`：
+
+```bash
+lerobot-train \
+  --dataset.repo_id=local/${TASK_ID}_success_only \
+  --dataset.root=data/${TASK_ID}_success_only/lerobot \
+  --policy.type=diffusion \
+  --policy.device=cuda \
+  --policy.use_amp=true \
+  --batch_size=1 \
+  --steps=100000 \
+  --eval_freq=0 \
+  --save_freq=10000 \
+  --save_checkpoint=true \
+  --wandb.enable=false \
+  --policy.push_to_hub=false \
+  --num_workers=8 \
+  --output_dir=outputs/train/${TASK_ID}_diffusion_success_only_v1
+```
+
+如果之后要训练失败分布或混合分布，不需要改 LeRobot 源码。失败-only 数据集把
+`--metadata-value` 改成 `failure`，输出到 `data/${TASK_ID}_failure_only/lerobot`；混合训练
+直接使用原始数据集，或按自己的规则再生成一个新的派生数据集。关键原则是：训练用哪些 episode，
+`meta/stats.json` 就应该由同一批 episode 聚合出来。
+
+`scripts/lerobot_train_episode_filter.py` 只适合快速实验：它会按 episode metadata 转发
+`--dataset.episodes` 给原生 `lerobot-train`，但不会重算 `meta/stats.json`。正式训练优先使用
+上面的物化数据集流程。
+
+## 8. 真机 RL / Human-in-loop Rollout
 
 有 policy checkpoint 后进入 HIL。按 `i` 切换人工接管，按 `s` 标记成功并结束 episode，按 `f` 标记失败并结束 episode，按 `Esc` 停止。HIL 录制默认保存三路相机；当前单视角 policy 只消费 `cam_left_wrist`，另外两路会写入 dataset 供后续三视角训练使用。
 
@@ -365,7 +438,7 @@ lerobot-human-inloop-record \
 
 通过标准：policy 能稳定输出动作；未接管时从臂执行 policy；按 `i` 后主臂增量接管从臂且不跳变；数据集中包含 policy action、intervention 状态和 episode success/failure 标签。
 
-## 8. 失败处理与边界
+## 9. 失败处理与边界
 
 - 没有 state topic：先查 `tools/can.sh`、udev 映射和四个 ROS 终端是否报错。
 - 没有 image topic：先在 `third_party/cobot_magic_ros_runtime` 下运行 `./tools/camera_serial.sh` 和 `./tools/cameras.sh`，再用 `./tools/check_cameras.sh` 确认频率。
