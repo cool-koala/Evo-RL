@@ -43,8 +43,20 @@ def resolve_dataset_root(dataset: str, root: Path | None) -> Path:
 
     base_root = root.expanduser().resolve() if root is not None else HF_LEROBOT_HOME.resolve()
     candidates = [base_root / dataset]
-    if "/" not in dataset.strip("/"):
-        candidates.append(base_root / "local" / dataset)
+    dataset_id = dataset.strip("/")
+    local_dataset_name = dataset_id.removeprefix("local/")
+    if "/" not in dataset_id:
+        candidates.append(base_root / "local" / dataset_id)
+
+    # Project-local recordings are commonly stored as data/<task_id>/lerobot while the repo id remains
+    # local/<task_id>. Support that layout so the short repo id works from the repository root.
+    project_data_root = Path.cwd() / "data"
+    candidates.extend(
+        [
+            project_data_root / local_dataset_name / "lerobot",
+            project_data_root / dataset_id / "lerobot",
+        ]
+    )
 
     for candidate in candidates:
         if candidate.exists():
