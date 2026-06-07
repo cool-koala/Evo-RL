@@ -4,13 +4,16 @@ set -euo pipefail
 runtime="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace="${runtime}/camera_ws"
 
-if [[ ! -f /opt/ros/noetic/setup.bash ]]; then
-    echo "Missing ROS Noetic: /opt/ros/noetic/setup.bash"
+if [[ ! -f /opt/ros/jazzy/setup.bash ]]; then
+    echo "Missing ROS2 Jazzy: /opt/ros/jazzy/setup.bash"
     exit 1
 fi
 
-source /opt/ros/noetic/setup.bash
+set +u
+source /opt/ros/jazzy/setup.bash
+set -u
+
 cd "${workspace}"
-catkin_make \
-    -DPYTHON_EXECUTABLE=/usr/bin/python3 \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+colcon build \
+    --symlink-install \
+    --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3

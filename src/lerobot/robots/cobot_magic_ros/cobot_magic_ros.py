@@ -28,9 +28,12 @@ from lerobot.utils.cobot_magic_ros import (
     import_ros,
     joint_state_to_observation,
     make_joint_state_message,
+    pose_stamped_to_ee_pose,
     prefixed_action_features,
+    prefixed_ee_pose_features,
     prefixed_observation_features,
     ros_image_to_numpy,
+    spin_ros_once,
 )
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
@@ -51,8 +54,11 @@ class CobotMagicRosFollower(Robot):
         self.config = config
         self.cameras = config.cameras
         self._ros = None
+        self._ros_node: Any | None = None
         self._left_state: Any | None = None
         self._right_state: Any | None = None
+        self._left_ee_state: Any | None = None
+        self._right_ee_state: Any | None = None
         self._images: dict[str, Any] = {}
         self._subscribers: list[Any] = []
         self._left_command_publisher: Any | None = None
@@ -64,6 +70,8 @@ class CobotMagicRosFollower(Robot):
         features: dict[str, type | tuple] = {
             **prefixed_observation_features("left"),
             **prefixed_observation_features("right"),
+            **prefixed_ee_pose_features("left"),
+            **prefixed_ee_pose_features("right"),
         }
         for camera_name, camera in self.config.cameras.items():
             features[camera_name] = (camera.height, camera.width, camera.channels)
@@ -74,6 +82,8 @@ class CobotMagicRosFollower(Robot):
         return {
             **prefixed_action_features("left", self.config.sync_gripper),
             **prefixed_action_features("right", self.config.sync_gripper),
+            **prefixed_ee_pose_features("left"),
+            **prefixed_ee_pose_features("right"),
         }
 
     @property
@@ -84,43 +94,52 @@ class CobotMagicRosFollower(Robot):
     def connect(self, calibrate: bool = True) -> None:
         del calibrate
         self._ros = import_ros()
-        ensure_ros_node(self._ros.rospy, self.config.node_name)
+        self._ros_node = ensure_ros_node(self._ros, self.config.node_name)
 
-        self._left_command_publisher = self._ros.rospy.Publisher(
+        self._left_command_publisher = self._ros_node.create_publisher(
+            self._ros.JointState,
             self.config.left_command_topic,
-            self._ros.JointState,
-            queue_size=self.config.publisher_queue_size,
+            self.config.publisher_queue_size,
         )
-        self._right_command_publisher = self._ros.rospy.Publisher(
-            self.config.right_command_topic,
+        self._right_command_publisher = self._ros_node.create_publisher(
             self._ros.JointState,
-            queue_size=self.config.publisher_queue_size,
+            self.config.right_command_topic,
+            self.config.publisher_queue_size,
         )
 
         self._subscribers = [
-            self._ros.rospy.Subscriber(
+            self._ros_node.create_subscription(
+                self._ros.JointState,
                 self.config.left_state_topic,
-                self._ros.JointState,
                 self._left_state_callback,
-                queue_size=self.config.subscriber_queue_size,
-                tcp_nodelay=True,
+                self.config.subscriber_queue_size,
             ),
-            self._ros.rospy.Subscriber(
-                self.config.right_state_topic,
+            self._ros_node.create_subscription(
                 self._ros.JointState,
+                self.config.right_state_topic,
                 self._right_state_callback,
-                queue_size=self.config.subscriber_queue_size,
-                tcp_nodelay=True,
+                self.config.subscriber_queue_size,
+            ),
+            self._ros_node.create_subscription(
+                self._ros.PoseStamped,
+                self.config.left_ee_state_topic,
+                self._left_ee_state_callback,
+                self.config.subscriber_queue_size,
+            ),
+            self._ros_node.create_subscription(
+                self._ros.PoseStamped,
+                self.config.right_ee_state_topic,
+                self._right_ee_state_callback,
+                self.config.subscriber_queue_size,
             ),
         ]
         for camera_name, camera in self.config.cameras.items():
             self._subscribers.append(
-                self._ros.rospy.Subscriber(
-                    camera.topic,
+                self._ros_node.create_subscription(
                     self._ros.Image,
+                    camera.topic,
                     lambda msg, camera_name=camera_name: self._image_callback(camera_name, msg),
-                    queue_size=self.config.subscriber_queue_size,
-                    tcp_nodelay=True,
+                    self._ros.qos_profile_sensor_data,
                 )
             )
 
@@ -146,6 +165,12 @@ class CobotMagicRosFollower(Robot):
     def _right_state_callback(self, msg: Any) -> None:
         self._right_state = msg
 
+    def _left_ee_state_callback(self, msg: Any) -> None:
+        self._left_ee_state = msg
+
+    def _right_ee_state_callback(self, msg: Any) -> None:
+        self._right_ee_state = msg
+
     def _image_callback(self, camera_name: str, msg: Any) -> None:
         self._images[camera_name] = msg
 
@@ -154,21 +179,38 @@ class CobotMagicRosFollower(Robot):
         while not predicate():
             if self.config.read_timeout_s == 0 or time.perf_counter() >= deadline:
                 return
+            if self._ros is not None:
+                spin_ros_once(self._ros, timeout_sec=0.0)
             time.sleep(self.config.poll_interval_s)
 
-    def _require_state(self, state: Any | None, topic: str) -> Any:
+    def _require_state(self, state: Any | None, topic: str, msg_type: str = "JointState") -> Any:
         if state is None:
-            raise RuntimeError(f"No Cobot Magic ROS JointState has been received from {topic!r}.")
+            raise RuntimeError(f"No Cobot Magic ROS {msg_type} has been received from {topic!r}.")
         return state
 
     @check_if_not_connected
     def get_joint_observation(self) -> RobotObservation:
-        self._wait_for(lambda: self._left_state is not None and self._right_state is not None)
+        self._wait_for(
+            lambda: (
+                self._left_state is not None
+                and self._right_state is not None
+                and self._left_ee_state is not None
+                and self._right_ee_state is not None
+            )
+        )
         left_state = self._require_state(self._left_state, self.config.left_state_topic)
         right_state = self._require_state(self._right_state, self.config.right_state_topic)
+        left_ee_state = self._require_state(
+            self._left_ee_state, self.config.left_ee_state_topic, "PoseStamped"
+        )
+        right_ee_state = self._require_state(
+            self._right_ee_state, self.config.right_ee_state_topic, "PoseStamped"
+        )
         return {
             **joint_state_to_observation(left_state, "left"),
             **joint_state_to_observation(right_state, "right"),
+            **pose_stamped_to_ee_pose(left_ee_state, "left"),
+            **pose_stamped_to_ee_pose(right_ee_state, "right"),
         }
 
     @check_if_not_connected
@@ -201,6 +243,23 @@ class CobotMagicRosFollower(Robot):
     def _send_action(self, action: RobotAction, *, max_relative_target: float | None) -> RobotAction:
         if self._ros is None:
             raise RuntimeError("Cobot Magic ROS follower is not connected.")
+        spin_ros_once(self._ros, timeout_sec=0.0)
+        if not self.config.send_actions:
+            _, sent_left = build_ros_joint_positions(
+                action,
+                "left",
+                current_state=self._left_state,
+                sync_gripper=self.config.sync_gripper,
+                max_relative_target=None,
+            )
+            _, sent_right = build_ros_joint_positions(
+                action,
+                "right",
+                current_state=self._right_state,
+                sync_gripper=self.config.sync_gripper,
+                max_relative_target=None,
+            )
+            return {**action, **sent_left, **sent_right}
         left_positions, sent_left = build_ros_joint_positions(
             action,
             "left",
@@ -217,13 +276,16 @@ class CobotMagicRosFollower(Robot):
         )
         self._left_command_publisher.publish(make_joint_state_message(self._ros, left_positions))
         self._right_command_publisher.publish(make_joint_state_message(self._ros, right_positions))
-        return {**sent_left, **sent_right}
+        return {**action, **sent_left, **sent_right}
 
     def disconnect(self) -> None:
         try:
             for subscriber in self._subscribers:
-                if hasattr(subscriber, "unregister"):
-                    subscriber.unregister()
+                if self._ros_node is not None:
+                    self._ros_node.destroy_subscription(subscriber)
+            for publisher in (self._left_command_publisher, self._right_command_publisher):
+                if self._ros_node is not None and publisher is not None:
+                    self._ros_node.destroy_publisher(publisher)
         finally:
             self._subscribers = []
             self._left_command_publisher = None

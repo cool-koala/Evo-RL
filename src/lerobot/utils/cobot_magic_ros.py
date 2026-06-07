@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,42 +30,79 @@ ROS_JOINT_NAMES = tuple(f"joint{idx}" for idx in range(7))
 
 @dataclass
 class RosImports:
-    rospy: Any
+    rclpy: Any
+    node: Any
+    qos_profile_sensor_data: Any
     Header: Any
     Bool: Any
     JointState: Any
+    PoseStamped: Any
     Image: Any
 
 
 def import_ros() -> RosImports:
-    """Lazy import ROS1 modules so non-ROS tests and config parsing keep working."""
+    """Lazy import ROS2 modules so non-ROS tests and config parsing keep working."""
 
     try:
-        import rospy
+        import rclpy
+        from geometry_msgs.msg import PoseStamped
+        from rclpy.node import Node
+        from rclpy.qos import qos_profile_sensor_data
         from sensor_msgs.msg import Image, JointState
         from std_msgs.msg import Bool, Header
     except ImportError as exc:
         raise ImportError(
-            "Cobot Magic ROS backend requires ROS1 Python packages. "
-            "Source your ROS environment first (`source /opt/ros/noetic/setup.zsh` for zsh, "
-            "or `source /opt/ros/noetic/setup.bash` for bash), and install the cobot_magic extra "
-            "so `rospkg` and `catkin_pkg` are available."
+            "Cobot Magic ROS backend requires ROS2 Python packages. "
+            "Source your ROS2 Jazzy environment first (`source /opt/ros/jazzy/setup.bash`)."
         ) from exc
-    return RosImports(rospy=rospy, Header=Header, Bool=Bool, JointState=JointState, Image=Image)
+    return RosImports(
+        rclpy=rclpy,
+        node=Node,
+        qos_profile_sensor_data=qos_profile_sensor_data,
+        Header=Header,
+        Bool=Bool,
+        JointState=JointState,
+        PoseStamped=PoseStamped,
+        Image=Image,
+    )
 
 
-def ensure_ros_node(rospy: Any, node_name: str) -> None:
-    """Initialize a ROS node only if the current process has not done so already."""
+_ROS2_NODE: Any | None = None
+_ROS2_EXECUTOR: Any | None = None
+_ROS2_SPIN_THREAD: threading.Thread | None = None
 
-    is_initialized = False
-    core = getattr(rospy, "core", None)
-    if core is not None and hasattr(core, "is_initialized"):
-        is_initialized = bool(core.is_initialized())
-    elif hasattr(rospy, "get_node_uri"):
-        is_initialized = rospy.get_node_uri() is not None
 
-    if not is_initialized:
-        rospy.init_node(node_name, anonymous=True, disable_signals=True)
+def ensure_ros_node(ros: RosImports, node_name: str) -> Any:
+    """Initialize and return the shared ROS2 node used by the Cobot Magic backend."""
+
+    global _ROS2_EXECUTOR, _ROS2_NODE, _ROS2_SPIN_THREAD
+
+    if not ros.rclpy.ok():
+        ros.rclpy.init(args=None, signal_handler_options=None)
+    if _ROS2_NODE is None:
+        _ROS2_NODE = ros.node(node_name)
+    if _ROS2_EXECUTOR is None:
+        from rclpy.executors import SingleThreadedExecutor
+
+        _ROS2_EXECUTOR = SingleThreadedExecutor()
+        _ROS2_EXECUTOR.add_node(_ROS2_NODE)
+    if _ROS2_SPIN_THREAD is None or not _ROS2_SPIN_THREAD.is_alive():
+        _ROS2_SPIN_THREAD = threading.Thread(
+            target=_ROS2_EXECUTOR.spin,
+            name="cobot_magic_ros2_executor",
+            daemon=True,
+        )
+        _ROS2_SPIN_THREAD.start()
+    return _ROS2_NODE
+
+
+def spin_ros_once(ros: RosImports, timeout_sec: float = 0.0) -> None:
+    """Service ROS2 callbacks for the shared node."""
+
+    if _ROS2_SPIN_THREAD is not None and _ROS2_SPIN_THREAD.is_alive():
+        return
+    if _ROS2_NODE is not None and ros.rclpy.ok():
+        ros.rclpy.spin_once(_ROS2_NODE, timeout_sec=timeout_sec)
 
 
 def prefixed_action_features(prefix: str, sync_gripper: bool = True) -> dict[str, type]:
@@ -83,6 +121,13 @@ def prefixed_observation_features(prefix: str) -> dict[str, type]:
     features[f"{prefix}_gripper.vel"] = float
     features[f"{prefix}_gripper.torque"] = float
     return features
+
+
+EE_POSE_KEYS = ("ee.x", "ee.y", "ee.z", "ee.wx", "ee.wy", "ee.wz", "ee.gripper_pos")
+
+
+def prefixed_ee_pose_features(prefix: str) -> dict[str, type]:
+    return {f"{prefix}_{key}": float for key in EE_POSE_KEYS}
 
 
 def _read_sequence_value(values: Any, index: int, default: float = 0.0) -> float:
@@ -111,6 +156,26 @@ def joint_state_to_action(msg: Any, prefix: str, sync_gripper: bool = True) -> R
     if sync_gripper:
         action[f"{prefix}_{ARX5_GRIPPER_KEY}"] = _read_sequence_value(msg.position, 6)
     return action
+
+
+def pose_stamped_to_ee_pose(msg: Any, prefix: str) -> RobotAction:
+    """Convert ARX PoseStamped EE feedback to LeRobot EE pose keys.
+
+    The ARX runtime stores End_Effector_Pose[3:6] in orientation.x/y/z and gripper in
+    orientation.w, so these fields are treated as wx/wy/wz/gripper_pos values rather
+    than a ROS quaternion.
+    """
+
+    pose = msg.pose
+    return {
+        f"{prefix}_ee.x": float(pose.position.x),
+        f"{prefix}_ee.y": float(pose.position.y),
+        f"{prefix}_ee.z": float(pose.position.z),
+        f"{prefix}_ee.wx": float(pose.orientation.x),
+        f"{prefix}_ee.wy": float(pose.orientation.y),
+        f"{prefix}_ee.wz": float(pose.orientation.z),
+        f"{prefix}_ee.gripper_pos": float(pose.orientation.w),
+    }
 
 
 def build_ros_joint_positions(
@@ -177,7 +242,9 @@ def _clip_relative_target(
 def make_joint_state_message(ros: RosImports, positions: list[float]) -> Any:
     msg = ros.JointState()
     msg.header = ros.Header()
-    msg.header.stamp = ros.rospy.Time.now()
+    if _ROS2_NODE is None:
+        raise RuntimeError("Cobot Magic ROS2 node has not been initialized.")
+    msg.header.stamp = _ROS2_NODE.get_clock().now().to_msg()
     msg.name = list(ROS_JOINT_NAMES)
     msg.position = [float(value) for value in positions]
     msg.velocity = []

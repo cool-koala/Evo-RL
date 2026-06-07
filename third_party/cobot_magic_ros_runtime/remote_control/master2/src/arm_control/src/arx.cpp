@@ -26,9 +26,15 @@
 int CONTROL_MODE=0; // 0 arx5 rc ，1 5a rc ，2 arx5 joint_control ，3 5a joint_control   4 arx5 pos_control  5 5a pos_control
 command cmd;
 
-bool app_stopped = false;
+volatile sig_atomic_t app_stopped = 0;
 void sigint_handler(int sig);
 void safe_stop(can CAN_Handlej);
+
+void sigint_handler(int sig)
+{
+    (void)sig;
+    app_stopped = 1;
+}
 
 int main(int argc, char **argv)
 {
@@ -55,7 +61,13 @@ int main(int argc, char **argv)
     {
         if (enabled)
         {
+            ARX_ARM.manual_control_requested = true;
             ARX_ARM.control_mode = 0;
+            ARX_ARM.init_kp = 10;
+            ARX_ARM.init_kp_4 = 0;
+            ARX_ARM.init_kd = 0;
+            ARX_ARM.init_kd_4 = 0;
+            ARX_ARM.init_kd_6 = 0;
             ARX_ARM.is_teach_mode = true;
             ARX_ARM.is_torque_control = true;
             ARX_ARM.teach2pos_returning = false;
@@ -67,6 +79,7 @@ int main(int argc, char **argv)
         }
         else
         {
+            ARX_ARM.manual_control_requested = false;
             ARX_ARM.control_mode = 2;
             ARX_ARM.is_teach_mode = false;
             ARX_ARM.is_torque_control = false;
@@ -83,7 +96,7 @@ int main(int argc, char **argv)
     ros::Subscriber sub_manual_control = node.subscribe<std_msgs::Bool>(
         manual_control_topic,
         10,
-        [&set_manual_control](const std_msgs::Bool::ConstPtr& msg)
+        [&set_manual_control](const std_msgs::Bool::ConstSharedPtr& msg)
         {
             set_manual_control(msg->data);
         });
@@ -91,13 +104,14 @@ int main(int argc, char **argv)
     ros::Subscriber sub_joint = node.subscribe<sensor_msgs::JointState>(
         command_topic,
         10,
-        [&ARX_ARM](const sensor_msgs::JointState::ConstPtr& msg)
+        [&ARX_ARM](const sensor_msgs::JointState::ConstSharedPtr& msg)
         {
             if (msg->position.size() < 7)
             {
                 ROS_WARN("Ignoring leader left JointState command with fewer than 7 positions.");
                 return;
             }
+            ARX_ARM.manual_control_requested = false;
             ARX_ARM.control_mode = 2;
             ARX_ARM.is_teach_mode = false;
             ARX_ARM.is_torque_control = false;
@@ -125,11 +139,14 @@ int main(int argc, char **argv)
 
     ros::Rate loop_rate(200);
     can CAN_Handlej;
+    signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigint_handler);
 
     std::thread keyThread(&arx5_keyboard::detectKeyPress, &ARX_KEYBOARD);
+    keyThread.detach();
     sleep(1);
 
-    while(ros::ok())
+    while(ros::ok() && !app_stopped)
     { 
         char key = ARX_KEYBOARD.keyPress.load();
         ARX_ARM.getKey(key);
@@ -213,6 +230,9 @@ int main(int argc, char **argv)
         
         CAN_Handlej.arx_1();
     }
+    ROS_WARN("Cobot Magic leader left stopping motors.");
     CAN_Handlej.arx_2();
+    usleep(100000);
+    _exit(0);
     return 0;
 }

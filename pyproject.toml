@@ -112,9 +112,7 @@ gamepad = ["lerobot[pygame-dep]", "hidapi>=0.14.0,<0.15.0"]
 hopejr = ["lerobot[feetech]", "lerobot[pygame-dep]"]
 cobot_magic = [
     "arx5-interface>=0.1.0,<0.2.0 ; sys_platform == 'linux'",
-    "catkin_pkg>=1.0.0,<2.0.0",
     "h5py>=3.10.0,<4.0.0",
-    "rospkg>=1.5.0,<2.0.0",
 ]
 lekiwi = ["lerobot[feetech]", "pyzmq>=26.2.1,<28.0.0"]
 unitree_g1 = [

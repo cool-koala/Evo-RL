@@ -63,6 +63,7 @@ lerobot-record \
 """
 
 import logging
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from pprint import pformat
@@ -136,7 +137,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so_leader,
     unitree_g1,
 )
-from lerobot.utils.constants import ACTION
+from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
     sanity_check_bimanual_piper_pair,
@@ -205,6 +206,8 @@ class DatasetRecordConfig:
     vcodec: str = "libsvtav1"
     # Rename map for the observation to override the image and state keys
     rename_map: dict[str, str] = field(default_factory=dict)
+    # If true, delete an existing local dataset directory without prompting before recording.
+    overwrite: bool = False
 
     def __post_init__(self):
         if self.single_task is None:
@@ -389,6 +392,49 @@ def _record_zero_pose_path(cfg: RecordConfig) -> Path | None:
     return None
 
 
+def _record_dataset_root(cfg: RecordConfig) -> Path:
+    return Path(cfg.dataset.root).expanduser() if cfg.dataset.root is not None else HF_LEROBOT_HOME / cfg.dataset.repo_id
+
+
+def _remove_existing_dataset_root(root: Path) -> None:
+    if root.is_dir():
+        shutil.rmtree(root)
+    else:
+        root.unlink()
+
+
+def _prepare_record_dataset_root(cfg: RecordConfig) -> None:
+    if cfg.resume:
+        return
+
+    root = _record_dataset_root(cfg)
+    if not root.exists():
+        return
+
+    if cfg.dataset.overwrite:
+        logging.warning("Overwriting existing local dataset directory: %s", root)
+        _remove_existing_dataset_root(root)
+        return
+
+    try:
+        answer = input(
+            f"Dataset directory already exists:\n  {root}\n"
+            "Overwrite it and delete the existing local data? [y/N] "
+        ).strip()
+    except EOFError as exc:
+        raise RuntimeError(
+            f"Dataset directory already exists: {root}. "
+            "Run interactively to confirm overwrite, pass `--dataset.overwrite=true`, "
+            "or choose a different `--dataset.repo_id`/`--dataset.root`."
+        ) from exc
+    if answer.lower() not in {"y", "yes"}:
+        logging.info("Recording cancelled. Existing dataset directory was kept: %s", root)
+        raise SystemExit(0)
+
+    logging.warning("Overwriting existing local dataset directory: %s", root)
+    _remove_existing_dataset_root(root)
+
+
 def _prepare_record_reset_pose(cfg: RecordConfig, robot) -> dict[str, float] | None:
     if not (
         cfg.reset_to_zero_pose or cfg.capture_reset_pose or cfg.reset_before_record or cfg.reset_after_episode
@@ -555,6 +601,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         else:
             # Create empty dataset or load existing saved episodes
             sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
+            _prepare_record_dataset_root(cfg)
             dataset = LeRobotDataset.create(
                 cfg.dataset.repo_id,
                 cfg.dataset.fps,
@@ -673,13 +720,29 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     hil_leader_return_action=leader_reset_pose,
                 )
 
+                rerecord_episode = bool(events["rerecord_episode"])
+                stop_without_label = bool(events["stop_recording"]) and events.get("episode_outcome") is None
+                discard_episode = rerecord_episode or stop_without_label
                 episode_success = None
-                if cfg.enable_episode_outcome_labeling:
-                    episode_success = resolve_episode_success_label(
-                        explicit_label=events.get("episode_outcome"),
-                        default_label=cfg.default_episode_success,
-                        require_label=cfg.require_episode_success_label,
-                    )
+                if cfg.enable_episode_outcome_labeling and not discard_episode:
+                    try:
+                        episode_success = resolve_episode_success_label(
+                            explicit_label=events.get("episode_outcome"),
+                            default_label=cfg.default_episode_success,
+                            require_label=cfg.require_episode_success_label,
+                        )
+                    except ValueError:
+                        if cfg.require_episode_success_label and events.get("episode_outcome") is None:
+                            logging.warning(
+                                "Episode %s has no success/failure label; discarding it. "
+                                "Press '%s' or '%s' to save an episode.",
+                                dataset.num_episodes,
+                                cfg.episode_success_key,
+                                cfg.episode_failure_key,
+                            )
+                            discard_episode = True
+                        else:
+                            raise
                     if events.get("episode_outcome") is None and episode_success is not None:
                         logging.warning(
                             "Episode %s has no explicit success/failure label, defaulting to '%s'.",
@@ -688,7 +751,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         )
 
                 on_episode_outcome = getattr(cfg, "_on_record_episode_outcome", None)
-                if callable(on_episode_outcome):
+                if callable(on_episode_outcome) and not discard_episode:
                     on_episode_outcome(robot, teleop, episode_success)
                 if cfg.reset_after_episode and not events["stop_recording"]:
                     _slow_reset_if_requested(
@@ -703,7 +766,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
                 if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                    (recorded_episodes < cfg.dataset.num_episodes - 1) or discard_episode
                 ):
                     log_say("Reset the environment", cfg.play_sounds)
 
@@ -735,12 +798,14 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         hil_leader_return_action=leader_reset_pose,
                     )
 
-                if events["rerecord_episode"]:
-                    log_say("Re-record episode", cfg.play_sounds)
+                if discard_episode:
+                    log_say("Re-record episode" if rerecord_episode else "Discard episode", cfg.play_sounds)
                     events["rerecord_episode"] = False
                     events["exit_early"] = False
                     events["episode_outcome"] = None
                     dataset.clear_episode_buffer()
+                    if events["stop_recording"]:
+                        break
                     continue
 
                 extra_episode_metadata = (

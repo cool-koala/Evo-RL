@@ -1,8 +1,7 @@
 # Cobot Magic ROS Runtime
 
-This directory vendors the Cobot Magic ROS1/C++ control runtime used for real robot HIL.
-It is copied from `/home/abc/guoxiaoyu/Dobot_Xtrainer/cobot_magic_wujie/cobot_magic/remote_control`
-as source-only runtime code. Catkin outputs such as `build/`, `devel/`, and `.catkin_workspace`
+This directory vendors the Cobot Magic ROS2 Jazzy/C++ control runtime used for real robot HIL.
+It is kept as source-only runtime code. Colcon outputs such as `build/`, `install/`, and `log/`
 are generated locally and should not be committed.
 
 The vendored copy publishes leader and follower state on `/cobot_magic/...` topics and subscribes to

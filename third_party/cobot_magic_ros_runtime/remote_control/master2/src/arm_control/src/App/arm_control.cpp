@@ -112,6 +112,23 @@ void arx_arm::update_real(command cmd)
     }
     else
     {
+        if(manual_control_requested && (!is_torque_control || !is_teach_mode || control_mode != 0))
+        {
+            control_mode = 0;
+            init_kp = 10;
+            init_kp_4 = 0;
+            init_kd = 0;
+            init_kd_4 = 0;
+            init_kd_6 = 0;
+            is_teach_mode = true;
+            is_torque_control = true;
+            teach2pos_returning = false;
+            for (int i = 0; i < 6; i++)
+            {
+                prev_target_pos[i] = target_pos[i];
+            }
+        }
+
         if(teach_flag ==0)
         {
             getKey('i');
@@ -194,7 +211,36 @@ void arx_arm::init_step()
     is_teach_mode = false;
     is_torque_control = false;
     current_normal=true;
-    ROS_WARN(">>>is_init>>>");
+    static int init_debug_counter = 0;
+    if ((init_debug_counter++ % 200) == 0)
+    {
+        ROS_WARN(
+            ">>>is_init>>> mode=%d start=%d arrived=%d temp_init=%d teach_return=%d "
+            "manual=%d normal=%d motor_signal=[%d,%d,%d,%d,%d,%d,%d,%d] "
+            "pos=[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]",
+            control_mode,
+            is_starting,
+            is_arrived,
+            temp_init,
+            teach2pos_returning,
+            manual_control_requested,
+            current_normal,
+            motor_signal[0],
+            motor_signal[1],
+            motor_signal[2],
+            motor_signal[3],
+            motor_signal[4],
+            motor_signal[5],
+            motor_signal[6],
+            motor_signal[7],
+            current_pos[0],
+            current_pos[1],
+            current_pos[2],
+            current_pos[3],
+            current_pos[4],
+            current_pos[5],
+            current_pos[6]);
+    }
       
 }
 

@@ -1,28 +1,33 @@
 # Cobot Magic 真机 RL 验证教程
 
-本文是当前推荐的 Cobot Magic/X5 真机验证 SOP。真机主从、采集、回放和 human-in-loop rollout 使用 ROS/C++ runtime 提供 CAN、关节控制、限位和重力补偿，Evo-RL 只负责策略推理、动作仲裁和人工介入。ARX5 Python SDK 路径仅保留为诊断入口，见 [`cobot_magic_arx5.md`](cobot_magic_arx5.md)。
+本文是当前推荐的 Cobot Magic/X5 真机验证 SOP。真机主从、采集、回放和 human-in-loop rollout 使用 ROS2 Jazzy/C++ runtime 提供 CAN、关节控制、限位和重力补偿，Evo-RL 只负责策略推理、动作仲裁和人工介入。ARX5 Python SDK 路径仅保留为诊断入口，见 [`cobot_magic_arx5.md`](cobot_magic_arx5.md)。
 
 ## 0. 安全与环境检查
 
 首次验证保持空载、低速、无遮挡，并确保操作员可以立即扶住机械臂或触发急停。不要在跟随稳定前放置任务物体。
 
 ```bash
-conda activate evo-rl
-python -m pip install -e ".[dev,test,cobot_magic]"
-python -m pip install ruff
-source /opt/ros/noetic/setup.zsh
-python -m pytest -q tests/test_cobot_magic_ros.py tests/utils/test_control_utils.py
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate evo-rl-ros2-jazzy
 python -m ruff check \
-  src/lerobot/scripts/robot_reset.py \
+  src/lerobot/scripts/lerobot_teleoperate.py \
   src/lerobot/scripts/lerobot_record.py \
   src/lerobot/scripts/lerobot_replay.py \
-  src/lerobot/scripts/lerobot_human_inloop_record.py \
-  tests/test_cobot_magic_ros.py
+  src/lerobot/scripts/recording_loop.py \
+  src/lerobot/scripts/robot_reset.py \
+  src/lerobot/robots/cobot_magic_ros \
+  src/lerobot/teleoperators/cobot_magic_ros \
+  src/lerobot/utils/cobot_magic_ros.py
+python -m py_compile \
+  src/lerobot/scripts/lerobot_teleoperate.py \
+  src/lerobot/scripts/lerobot_record.py
+lerobot-teleoperate --help | rg "cobot_magic_ros|startup_sync"
+lerobot-record --help | rg "cobot_magic_ros|startup_sync|reset_to_zero_pose"
 ```
 
-如果当前终端是 bash，再改用 `source /opt/ros/noetic/setup.bash`。不要在 zsh 里 source `setup.bash`。
+本机使用专用 conda 环境 `evo-rl-ros2-jazzy`，激活后会自动加载 `/opt/ros/jazzy/setup.bash`。如果环境不存在，先执行 `conda create -n evo-rl-ros2-jazzy python=3.12 pip`，再在仓库根目录运行 `python -m pip install -e ".[dev,test,cobot_magic,transformers-dep]" ruff`。
 
-通过标准：ROS 后端单测和 Ruff 检查通过；这只验证 Evo-RL 适配层，不代表真机运动安全。如果 `python -m ruff` 提示缺模块，先在当前 `evo-rl` 环境中执行上面的 `python -m pip install ruff`。
+通过标准：Ruff、`py_compile` 和 CLI 类型注册检查通过，`ROS_DISTRO=jazzy`、`ROS_VERSION=2`。这只验证 Evo-RL 适配层，不代表真机运动安全。
 
 ## 1. 硬件映射
 
@@ -50,7 +55,7 @@ cd third_party/cobot_magic_ros_runtime/remote_control
 
 ```bash
 cd third_party/cobot_magic_ros_runtime/remote_control
-source /opt/ros/noetic/setup.zsh
+conda activate evo-rl-ros2-jazzy
 ./tools/build.sh
 ./tools/can.sh
 for iface in can0 can1 can2 can3; do ip -details link show "$iface"; done
@@ -64,7 +69,7 @@ for iface in can0 can1 can2 can3; do ip -details link show "$iface"; done
 ```bash
 cd third_party/cobot_magic_ros_runtime/remote_control
 ./tools/arm_serial.sh
-pgrep -af 'slcand|roslaunch arm_control|arm_node' || true
+pgrep -af 'slcand|ros2 launch arm_control|arm_node' || true
 for iface in can0 can1 can2 can3; do ip -details link show "$iface" || true; done
 ./tools/can.sh
 for iface in can0 can1 can2 can3; do ip -details link show "$iface"; done
@@ -76,19 +81,28 @@ for iface in can0 can1 can2 can3; do ip -details link show "$iface"; done
 检查 topic：
 
 ```bash
-rostopic hz /cobot_magic/leader/joint_right
-rostopic hz /cobot_magic/leader/joint_left
-rostopic hz /cobot_magic/puppet/joint_right
-rostopic hz /cobot_magic/puppet/joint_left
-rostopic info /cobot_magic/command/joint_right
-rostopic info /cobot_magic/command/joint_left
+ros2 topic hz /cobot_magic/leader/joint_right
+ros2 topic hz /cobot_magic/leader/joint_left
+ros2 topic hz /cobot_magic/puppet/joint_right
+ros2 topic hz /cobot_magic/puppet/joint_left
+ros2 topic hz /cobot_magic/leader/end_right
+ros2 topic hz /cobot_magic/leader/end_left
+ros2 topic hz /cobot_magic/puppet/end_right
+ros2 topic hz /cobot_magic/puppet/end_left
+ros2 topic info /cobot_magic/command/joint_right
+ros2 topic info /cobot_magic/command/joint_left
 ```
 
 通过标准：四个 state topic 都有稳定频率，两个 command topic 有 subscriber。
 
 ## 3. 启动相机 ROS 节点
 
-当前这台机器使用 3 个奥比中光 Astra/Orbbec 相机，默认映射为：
+当前这台机器使用 3 个 RGB 相机，ROS2 相机包通过 OpenCV/V4L2 读取 `/dev/video*` 或
+`/dev/v4l/...` 设备，发布 `rgb8` 图像。旧 ROS1 相机启动脚本不是单一奥比中光方案：
+`camera_f` 和 `camera_r` 走自定义 `realsense_sdk_bridge`/`pyrealsense2`，`camera_l` 走
+`astra_camera`/OpenNI2/`liborbbec.so`。当前接入本机的三路相机序列号均为 `AU...`，USB VID
+为 `2bc5`，视频节点以 UVC/Sonix 方式枚举；右腕看不到时优先排查枚举、USB 带宽和像素格式，
+不要直接假设是缺少 Orbbec ROS2 SDK。
 
 | 视角 | 序列号 | ROS topic | LeRobot key |
 | --- | --- | --- | --- |
@@ -106,25 +120,43 @@ cd third_party/cobot_magic_ros_runtime
 每次真机采集前启动相机：
 
 ```bash
-cd /home/abc/guoxiaoyu/Dobot_Xtrainer/Evo-RL/third_party/cobot_magic_ros_runtime
+cd third_party/cobot_magic_ros_runtime
 ./tools/camera_serial.sh
 ./tools/cameras.sh
 ```
 
 如果当前 shell 已经在 `third_party/cobot_magic_ros_runtime` 目录内，直接运行 `./tools/camera_serial.sh` 和 `./tools/cameras.sh`，不要再执行相对路径 `cd third_party/cobot_magic_ros_runtime`。
 
-`tools/cameras.sh` 会打开一个新的 `cobot_magic_cameras_astra` 终端运行相机 ROS 节点。采集期间不要关闭这个终端；如果已经关掉，重新运行 `./tools/cameras.sh`。启动前脚本会检查三台相机 serial，任一缺失都会退出，不会启动半残的相机栈。
+`tools/cameras.sh` 会打开一个新的 `cobot_magic_cameras` 终端运行相机 ROS2 节点。采集期间不要关闭这个终端；如果已经关掉，重新运行 `./tools/cameras.sh`。默认按 `CAMERA_F_SERIAL`、`CAMERA_L_SERIAL`、`CAMERA_R_SERIAL` 查找稳定设备链接；如果现场设备名固定，也可以设置 `CAMERA_F_DEVICE=/dev/video0`、`CAMERA_L_DEVICE=/dev/video1`、`CAMERA_R_DEVICE=/dev/video2`。
+
+默认强制 `CAMERA_FOURCC=MJPG`。本机三路设备都支持 `MJPG 640x480@30`；如果让 OpenCV 使用默认
+未压缩格式，三路同时打开时可能出现右腕能打开但读不到帧。需要验证底层能力时运行：
+
+```bash
+v4l2-ctl --list-devices
+v4l2-ctl -d /dev/video3 --list-formats-ext
+v4l2-ctl -d /dev/video7 --list-formats-ext
+v4l2-ctl -d /dev/video9 --list-formats-ext
+```
 
 如果 `camera_serial.sh` 只显示 2 台设备，或 `check_cameras.sh` 显示 `/camera_r/color/image_raw: missing`，说明系统没有枚举到右腕相机 `AU1SB33005A`。先停止旧相机节点，再检查右腕相机 USB 线、USB hub 供电和插口；重新插拔后再次检查：
 
 ```bash
-cd /home/abc/guoxiaoyu/Dobot_Xtrainer/Evo-RL/third_party/cobot_magic_ros_runtime
+cd third_party/cobot_magic_ros_runtime
 ./tools/stop_cameras.sh
 ./tools/camera_serial.sh
 lsusb | grep 2bc5
 ```
 
 正常情况下 `camera_serial.sh` 应看到 `AU1SB3300XB`、`AU1SB3300YB`、`AU1SB33005A` 三个 serial，`lsusb | grep 2bc5` 应看到三组奥比中光设备。
+
+奥比中光官方 `OrbbecSDK_ROS2` 仓库可以用代理拉取，例如
+`git clone https://gh-proxy.com/https://github.com/orbbec/OrbbecSDK_ROS2.git`。官方 `v2-main`
+分支和 Ubuntu 二进制包支持 ROS2 Jazzy，适合新 UVC 系列设备；README 同时说明旧 OpenNI 设备应看
+`main` 分支。本机已验证 `ros-jazzy-orbbec-camera` 能安装，`list_ob_devices.sh` 能在 USB 层看到
+三组 `2bc5:050e` RGB 和 `2bc5:060e` depth 设备，但 `ros2 run orbbec_camera list_devices_node`
+没有列出可管理设备，`gemini_330_series`/`dabai_a` launch 也未发布图像。因此当前默认 runtime 不
+切换到官方 SDK；数据采集只需要 640x480 RGB，继续使用已验证的 OpenCV/V4L2 + MJPG 路径。
 
 采集前检查三路图像频率：
 
@@ -133,7 +165,7 @@ cd third_party/cobot_magic_ros_runtime
 ./tools/check_cameras.sh
 ```
 
-通过标准：三个 image topic 都存在并有约 30 Hz 频率。没有相机 topic 时，`lerobot-record` 会在第一帧报 `No Cobot Magic ROS image has been received`。
+通过标准：三个 image topic 都存在并持续出帧。当前相机仍使用 OpenCV/V4L2 方案，图像实际频率不作为严格 30 Hz 门槛；`dataset.fps=30` 主要约束机械臂状态、action 和记录循环。没有相机 topic 时，`lerobot-record` 会在第一帧报 `No Cobot Magic ROS image has been received`。
 
 ## 4. 低速主从跟随 Smoke Test
 
@@ -163,11 +195,11 @@ lerobot-teleoperate \
 
 确认跟随后再录制短数据集。默认会采三路相机；只有做纯关节 smoke test 时才加 `--robot.cameras='{}'`。正常数据录制和 HIL 录制都不要覆盖成单相机配置。
 
-开始采集前确认四个机械臂 ROS 终端和 `cobot_magic_cameras_astra` 相机终端都还在运行。`dataset.repo_id` 每次 smoke test 建议换新名字，例如 `local/cobot_magic_ros_smoke_001`，避免和半途失败的数据目录冲突。
+开始采集前确认四个机械臂 ROS2 终端和 `cobot_magic_cameras` 相机终端都还在运行。`dataset.repo_id` 每次 smoke test 建议换新名字，例如 `local/cobot_magic_ros_smoke_001`，避免和半途失败的数据目录冲突。
 
 当前 Python/ROS 适配层只能向从臂 command topic 发目标关节，主臂 ROS backend 是只读状态源，不能由 Evo-RL 主动驱动主臂归零。这里的 0 位指数据采集的初始物理姿态，不要求 ROS JointState 数值全为 `0.0`。这台机器当前固定初始姿态已写入 `src/lerobot/robots/cobot_magic_ros/reset_poses/cobot_magic_ros_x5_initial_pose.json`；录制和回放测试统一要求从这个初始姿态开始、结束也回到这个初始姿态。
 
-下面命令使用 `--reset_to_zero_pose=true`，程序会读取项目内固定 JSON：`joint_pos` 作为从臂慢速复位目标，`leader_joint_pos` 作为主臂启动检查基准。开始前先把从臂和两条主臂都放回该固定初始姿态；如果主臂读数超过 `reset_pose_tolerance` 会直接报错，避免从错误姿态开始采集。
+精简采集默认不做自动初始位 reset，减少每段开始和结束的等待，也避免机械臂自动复位影响现场摆位。开始采集前人工把主臂、从臂和任务物体放到合适起始姿态；`teleop.startup_sync=true` 仍会建立主从相对接管零点，避免启动瞬间跳变。
 
 第一次验证建议只录 1 个 episode，确认 reset 和 startup sync 方向正确后再增加 episode 数：
 
@@ -184,11 +216,6 @@ lerobot-record \
   --teleop.startup_sync=true \
   --teleop.startup_sync_duration_s=5.0 \
   --teleop.startup_sync_max_joint_delta=1.5 \
-  --reset_to_zero_pose=true \
-  --reset_before_record=true \
-  --reset_after_episode=true \
-  --reset_duration_s=8.0 \
-  --reset_pose_tolerance=0.05 \
   --dataset.repo_id=local/cobot_magic_ros_smoke_001 \
   --dataset.single_task="cobot magic smoke test" \
   --dataset.num_episodes=1 \
@@ -196,12 +223,13 @@ lerobot-record \
   --dataset.reset_time_s=5 \
   --dataset.fps=30 \
   --dataset.push_to_hub=false \
-  --display_data=true
+  --dataset.overwrite=false \
+  --display_data=false
 ```
 
-`reset_before_record=true` 会在每段数据开始前先把从臂慢速拉回 JSON 固定初始姿态；随后 `teleop.startup_sync=true` 会确认主臂也在该固定姿态附近，再重新建立相对遥操作零点。`reset_after_episode=true` 会在每段 episode 结束后把从臂慢速拉回初始姿态。新数据集会保存 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三路图像。
+如果 `dataset.repo_id` 或 `dataset.root` 已存在，`lerobot-record` 会询问是否覆盖本地旧数据。输入 `y` 删除旧目录并重录，直接回车会取消。批量采集时可传 `--dataset.overwrite=true` 跳过确认。新数据集会保存 joint、EE pose 和 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三路图像。
 
-多 episode 采集时，每段结束后从臂会回到 JSON 固定初始姿态；在下一段开始前，操作员需要把两条主臂也手动放回同一姿态。否则程序会在开始下一段前报错，不会再把从臂从初始姿态同步到主臂停留的当前姿态。中间的 `dataset.reset_time_s` 是给你整理场景和手动摆回主臂的时间；如果不需要这个窗口，可以设为 `0`。
+多 episode 采集时，每段结束后不会自动复位机械臂；中间的 `dataset.reset_time_s` 是给你整理场景、摆物体和手动回到起始姿态的时间。如果不需要这个窗口，可以设为 `0`。
 
 采集后检查：
 
@@ -210,7 +238,81 @@ lerobot-dataset-report --dataset local/cobot_magic_ros_smoke_001
 lerobot-dataset-viz --repo-id local/cobot_magic_ros_smoke_001 --episode-index 0 --display-compressed-images 0
 ```
 
-通过标准：action 为左右臂关节和夹爪目标，shape 为 14；图像、episode 时长和 action 曲线正常，没有明显断帧或阶跃。旧的 12D 数据集是早期 `sync_gripper=false` smoke 数据，不再作为新训练流程基准，不能和新 14D 数据直接混用。
+通过标准：`action` shape 为 28，包含双臂 joint+gripper 目标 14D 和双臂 EE pose 14D；`observation.state` shape 为 56，包含双臂 joint pos/vel/torque+gripper 42D 和双臂 EE pose 14D；图像、episode 时长和 action 曲线正常，没有明显断帧或阶跃。旧的 12D 数据集是早期 `sync_gripper=false` smoke 数据，不再作为新训练流程基准，不能和新数据直接混用。
+
+EE pose 按 LeRobot EE space 保存为 7 个标量：`ee.x`、`ee.y`、`ee.z`、`ee.wx`、`ee.wy`、`ee.wz`、`ee.gripper_pos`。双臂字段带左右前缀，例如 `left_ee.x`、`right_ee.gripper_pos`。Cobot Magic runtime 的 EE topic 是 `PoseStamped`，但 `orientation.x/y/z` 实际存放 ARX `End_Effector_Pose[3:6]`，这里按 `wx/wy/wz` 保存，不按 ROS 四元数解释；`orientation.w` 保存夹爪位置。
+
+### 5.1 连续采集 50-100 组数据
+
+正式采集前先清掉旧进程，避免旧 ROS topic、CAN 或相机节点占用设备：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+./third_party/cobot_magic_ros_runtime/remote_control/tools/stop_arms.sh
+./third_party/cobot_magic_ros_runtime/tools/stop_cameras.sh
+sudo pkill -x slcand || true
+```
+
+终端 1 启动四条机械臂，并保持窗口打开。结束采集时在这个终端按 `Ctrl-C`，脚本会请求 arm node 退出并下电/解锁电机：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL/third_party/cobot_magic_ros_runtime/remote_control
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate evo-rl-ros2-jazzy
+./tools/remote.sh
+```
+
+终端 2 启动三路 RGB 相机并检查频率：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL/third_party/cobot_magic_ros_runtime
+./tools/cameras.sh
+./tools/check_cameras.sh
+```
+
+终端 3 从仓库根目录开始采集。`N=50` 可改为 `N=100`；`episode_time_s` 是单组最大时长，完成或失败后用按键提前结束：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate evo-rl-ros2-jazzy
+
+TASK_ID=cobot_magic_task_001
+TASK_DESC="your task name"
+N=50
+
+lerobot-record \
+  --robot.type=cobot_magic_ros_follower \
+  --robot.id=cobot_magic_ros_follower_record \
+  --robot.sync_gripper=true \
+  --teleop.type=cobot_magic_ros_leader \
+  --teleop.id=cobot_magic_ros_leader_record \
+  --teleop.sync_gripper=true \
+  --teleop.manual_control=true \
+  --teleop.relative_takeover=true \
+  --teleop.startup_sync=true \
+  --teleop.startup_sync_duration_s=5.0 \
+  --teleop.startup_sync_max_joint_delta=1.5 \
+  --dataset.repo_id=local/${TASK_ID} \
+  --dataset.root=/home/guoxiaoyu/Evo-RL/data/${TASK_ID}/lerobot \
+  --dataset.single_task="${TASK_DESC}" \
+  --dataset.num_episodes=${N} \
+  --dataset.episode_time_s=20 \
+  --dataset.reset_time_s=8 \
+  --dataset.fps=30 \
+  --dataset.push_to_hub=false \
+  --dataset.vcodec=h264 \
+  --dataset.overwrite=false \
+  --enable_episode_outcome_labeling=true \
+  --require_episode_success_label=true \
+  --episode_success_key=s \
+  --episode_failure_key=f \
+  --display_data=false
+```
+
+每组 episode 的按键规则：按 `s` 保存为成功并结束当前组，按 `f` 保存为失败并结束当前组，按左方向键丢弃当前组并重录，按 `Esc` 停止整个采集。不要用右方向键结束正式数据，因为当前命令要求必须写入成功/失败标签。标签保存在 episode metadata 的 `episode_success` 字段，取值为 `success` 或 `failure`。
+
+数据保存到 `/home/guoxiaoyu/Evo-RL/data/${TASK_ID}/lerobot`。新数据按 `dataset.fps=30` 记录机械臂状态和 action，包含 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三路 RGB 图像；相机帧率允许低于 30 Hz。`action` 为 28D，包含双臂 joint+gripper 目标和双臂 EE pose；`observation.state` 为 56D，包含双臂 joint pos/vel/torque+gripper 和双臂 EE pose。
 
 ## 6. 回放验证
 
@@ -235,7 +337,7 @@ lerobot-replay \
 
 回放前会先慢速回到 JSON 固定初始姿态；`require_replay_start_pose=true` 会检查数据集第一帧 action 是否接近该固定姿态，避免突然跳到第一帧动作。回放结束后从臂会慢速回到同一初始姿态。
 
-如果需要边回放边看实时相机，先运行 `third_party/cobot_magic_ros_runtime/tools/check_cameras.sh`，确认三路图像都在约 30 Hz，再去掉 `--robot.cameras='{}'`。任一路相机 topic 缺失时，默认 replay 会在 `robot.get_observation()` 阶段失败。
+如果需要边回放边看实时相机，先运行 `third_party/cobot_magic_ros_runtime/tools/check_cameras.sh`，确认三路图像 topic 都存在并持续出帧，再去掉 `--robot.cameras='{}'`。任一路相机 topic 缺失时，默认 replay 会在 `robot.get_observation()` 阶段失败。
 
 通过标准：从臂动作方向和幅度与采集一致；退出后无高刚度保持或异常拖拽感。
 

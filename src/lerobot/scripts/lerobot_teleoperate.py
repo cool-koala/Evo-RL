@@ -76,6 +76,7 @@ from lerobot.robots import (  # noqa: F401
     bi_piper_follower,
     bi_so_follower,
     cobot_magic,
+    cobot_magic_ros,
     earthrover_mini_plus,
     hope_jr,
     koch_follower,
@@ -94,6 +95,7 @@ from lerobot.teleoperators import (  # noqa: F401
     bi_piper_leader,
     bi_so_leader,
     cobot_magic as cobot_magic_leader,
+    cobot_magic_ros as cobot_magic_ros_leader,
     gamepad,
     homunculus,
     keyboard,
@@ -111,7 +113,6 @@ from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-
 
 LOOP_STATUS_INTERVAL_S = 0.5
 
@@ -159,6 +160,71 @@ def _configure_robot_for_lightweight_teleop(
     if should_fetch_obs:
         return
     robot.set_teleop_send_only_mode(True)
+
+
+def _get_robot_joint_position_action(robot: Robot) -> RobotAction:
+    get_joint_observation = getattr(robot, "get_joint_observation", None)
+    observation = get_joint_observation() if callable(get_joint_observation) else robot.get_observation()
+    return {
+        key: float(observation[key])
+        for key in robot.action_features
+        if key.endswith(".pos") and key in observation
+    }
+
+
+def _run_startup_sync_if_requested(robot: Robot, teleop: Teleoperator, fps: int) -> None:
+    teleop_config = getattr(teleop, "config", None)
+    if not getattr(teleop_config, "startup_sync", False):
+        return
+    if fps <= 0:
+        raise ValueError("`fps` must be > 0.")
+    if not hasattr(teleop, "get_absolute_action"):
+        raise RuntimeError("Startup sync requires teleop.get_absolute_action support.")
+
+    duration_s = float(getattr(teleop_config, "startup_sync_duration_s", 3.0))
+    if duration_s <= 0:
+        raise ValueError("`startup_sync_duration_s` must be > 0.")
+    max_joint_delta = getattr(teleop_config, "startup_sync_max_joint_delta", None)
+
+    current_action = _get_robot_joint_position_action(robot)
+    target_action = teleop.get_absolute_action()
+    action_keys = [key for key in robot.action_features if key.endswith(".pos")]
+    joint_keys = [key for key in action_keys if key in current_action and key in target_action]
+    missing_keys = sorted(set(action_keys) - set(joint_keys))
+    if missing_keys:
+        raise RuntimeError(f"Startup sync cannot resolve joint position keys: {missing_keys}")
+
+    joint_deltas = {
+        key: abs(float(target_action[key]) - float(current_action[key])) for key in joint_keys
+    }
+    largest_delta_key = max(joint_deltas, key=joint_deltas.get)
+    largest_delta = joint_deltas[largest_delta_key]
+    if max_joint_delta is not None and largest_delta > float(max_joint_delta):
+        raise RuntimeError(
+            "Startup sync refused because the leader/follower pose delta is too large: "
+            f"{largest_delta_key}={largest_delta:.3f} rad > {float(max_joint_delta):.3f} rad. "
+            "Move the leader and follower closer first, or increase `teleop.startup_sync_max_joint_delta` "
+            "only after confirming the motion is safe."
+        )
+
+    steps = max(int(duration_s * fps), 1)
+    step_dt_s = duration_s / steps
+    send_action = getattr(robot, "send_action_without_relative_limit", robot.send_action)
+    logging.info("Running startup sync over %.2fs.", duration_s)
+    for step_idx in range(1, steps + 1):
+        alpha = step_idx / steps
+        action: RobotAction = {
+            key: float(current_action[key])
+            + (float(target_action[key]) - float(current_action[key])) * alpha
+            for key in joint_keys
+        }
+        send_action(action)
+        precise_sleep(step_dt_s)
+
+    set_manual_control = getattr(teleop, "set_manual_control", None)
+    if callable(set_manual_control):
+        set_manual_control(bool(getattr(teleop_config, "manual_control", False)))
+    logging.info("Startup sync complete.")
 
 
 def teleop_loop(
@@ -272,6 +338,7 @@ def teleoperate(cfg: TeleoperateConfig):
     try:
         teleop.connect()
         robot.connect()
+        _run_startup_sync_if_requested(robot, teleop, cfg.fps)
         teleop_loop(
             teleop=teleop,
             robot=robot,

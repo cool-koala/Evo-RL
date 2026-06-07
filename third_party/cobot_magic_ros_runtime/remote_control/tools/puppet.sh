@@ -3,6 +3,20 @@ set -euo pipefail
 
 workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-gnome-terminal -t "follow1_right_follower" -- bash -c "cd '${workspace}/follow1'; source devel/setup.bash && roslaunch arm_control arx5.launch control_mode:=2; exec bash;"
+launch_terminal() {
+    local title="$1"
+    local command="$2"
+
+    if command -v gnome-terminal >/dev/null 2>&1; then
+        gnome-terminal -t "${title}" -- bash -lc "${command}; exec bash"
+    else
+        echo "gnome-terminal not found; starting ${title} in background."
+        bash -lc "${command}" &
+    fi
+}
+
+launch_terminal "follow1_right_follower" \
+    "set +u && source /opt/ros/jazzy/setup.bash && source '${workspace}/follow1/install/setup.bash' && set -u && ros2 launch arm_control arx5.launch.py control_mode:=2"
 sleep 1
-gnome-terminal -t "follow2_left_follower" -- bash -c "cd '${workspace}/follow2'; source devel/setup.bash && roslaunch arm_control arx5.launch control_mode:=2; exec bash;"
+launch_terminal "follow2_left_follower" \
+    "set +u && source /opt/ros/jazzy/setup.bash && source '${workspace}/follow2/install/setup.bash' && set -u && ros2 launch arm_control arx5.launch.py control_mode:=2"

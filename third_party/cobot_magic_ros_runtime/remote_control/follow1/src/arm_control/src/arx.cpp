@@ -26,9 +26,15 @@
 int CONTROL_MODE=0; // 0 arx5 rc ，1 5a rc ，2 arx5 joint_control ，3 5a joint_control   4 arx5 pos_control  5 5a pos_control
 command cmd;
 
-bool app_stopped = false;
+volatile sig_atomic_t app_stopped = 0;
 void sigint_handler(int sig);
 void safe_stop(can CAN_Handlej);
+
+void sigint_handler(int sig)
+{
+    (void)sig;
+    app_stopped = 1;
+}
 
 int main(int argc, char **argv)
 {
@@ -46,7 +52,7 @@ int main(int argc, char **argv)
 ////topic ////////////////////////////////////////////////////
 
                             // ros::Subscriber sub_joint = node.subscribe<arm_control::JointControl>("joint_control", 10, 
-                            //                             [&ARX_ARM](const arm_control::JointControl::ConstPtr& msg) {
+                            //                             [&ARX_ARM](const arm_control::JointControl::ConstSharedPtr& msg) {
                             //                                 ARX_ARM.ros_control_pos_t[0] = msg->joint_pos[0];
                             //                                 ARX_ARM.ros_control_pos_t[1] = msg->joint_pos[1];
                             //                                 ARX_ARM.ros_control_pos_t[2] = msg->joint_pos[2];
@@ -76,7 +82,7 @@ int main(int argc, char **argv)
     node.param<std::string>("end_topic", end_topic, "/cobot_magic/puppet/end_right");
 
     ros::Subscriber sub_joint = node.subscribe<sensor_msgs::JointState>(command_topic, 10, 
-                                [&ARX_ARM](const sensor_msgs::JointState::ConstPtr& msg) 
+                                [&ARX_ARM](const sensor_msgs::JointState::ConstSharedPtr& msg)
     {   
         // 检查 position 数组大小
         if(msg->position.size() >= 7)
@@ -121,11 +127,14 @@ int main(int argc, char **argv)
 
     ros::Rate loop_rate(200);
     can CAN_Handlej;
+    signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigint_handler);
 
     std::thread keyThread(&arx5_keyboard::detectKeyPress, &ARX_KEYBOARD);
+    keyThread.detach();
     sleep(1);
 
-    while(ros::ok())
+    while(ros::ok() && !app_stopped)
     { 
         char key = ARX_KEYBOARD.keyPress.load();
         ARX_ARM.getKey(key);
@@ -225,6 +234,9 @@ int main(int argc, char **argv)
         
         CAN_Handlej.arx_1();
     }
+    ROS_WARN("Cobot Magic follower right stopping motors.");
     CAN_Handlej.arx_2();
+    usleep(100000);
+    _exit(0);
     return 0;
 }

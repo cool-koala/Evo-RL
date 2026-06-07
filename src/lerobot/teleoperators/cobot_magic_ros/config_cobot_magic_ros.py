@@ -26,6 +26,10 @@ class CobotMagicRosLeaderConfig(TeleoperatorConfig):
 
     left_leader_state_topic: str = "/cobot_magic/leader/joint_left"
     right_leader_state_topic: str = "/cobot_magic/leader/joint_right"
+    left_leader_ee_topic: str = "/cobot_magic/leader/end_left"
+    right_leader_ee_topic: str = "/cobot_magic/leader/end_right"
+    left_follower_ee_topic: str = "/cobot_magic/puppet/end_left"
+    right_follower_ee_topic: str = "/cobot_magic/puppet/end_right"
     left_leader_command_topic: str = "/cobot_magic/leader/command_joint_left"
     right_leader_command_topic: str = "/cobot_magic/leader/command_joint_right"
     left_leader_manual_control_topic: str = "/cobot_magic/leader/manual_control_left"
@@ -34,7 +38,7 @@ class CobotMagicRosLeaderConfig(TeleoperatorConfig):
     right_follower_state_topic: str = "/cobot_magic/puppet/joint_right"
     sync_gripper: bool = True
     relative_takeover: bool = True
-    manual_control: bool = False
+    manual_control: bool = True
     startup_sync: bool = False
     startup_sync_duration_s: float = 3.0
     startup_sync_max_joint_delta: float | None = 1.5
@@ -48,6 +52,10 @@ class CobotMagicRosLeaderConfig(TeleoperatorConfig):
     def __post_init__(self):
         if self.left_leader_state_topic == self.right_leader_state_topic:
             raise ValueError("Cobot Magic ROS left and right leader topics must be different.")
+        if self.left_leader_ee_topic == self.right_leader_ee_topic:
+            raise ValueError("Cobot Magic ROS left and right leader EE topics must be different.")
+        if self.relative_takeover and self.left_follower_ee_topic == self.right_follower_ee_topic:
+            raise ValueError("Cobot Magic ROS left and right follower EE topics must be different.")
         if self.left_leader_command_topic == self.right_leader_command_topic:
             raise ValueError("Cobot Magic ROS left and right leader command topics must be different.")
         if self.left_leader_manual_control_topic == self.right_leader_manual_control_topic:

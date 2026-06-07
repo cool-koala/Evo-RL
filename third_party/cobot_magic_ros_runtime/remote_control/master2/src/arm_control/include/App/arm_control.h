@@ -155,6 +155,7 @@ public:
     bool button_replay=0;
     bool is_torque_control = false;
     bool is_teach_mode = false;
+    bool manual_control_requested = false;
     bool teach_mode = false;
 
     bool is_recording=false;

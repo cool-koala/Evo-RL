@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-source /opt/ros/noetic/setup.bash
+set +u
+source /opt/ros/jazzy/setup.bash
+set -u
 
 topics=(
     "/camera_f/color/image_raw"
@@ -9,13 +11,18 @@ topics=(
     "/camera_r/color/image_raw"
 )
 
-echo "Checking Cobot Magic Astra/Orbbec camera topics:"
+echo "Checking Cobot Magic ROS2 RGB camera topics:"
 for topic in "${topics[@]}"; do
-    if rostopic list | grep -qx "${topic}"; then
+    if ros2 topic list | grep -Fqx "${topic}"; then
         echo
         echo "${topic}: present"
-        rostopic info "${topic}" | sed -n '1,8p'
-        timeout 3 rostopic hz "${topic}" || true
+        ros2 topic info "${topic}" | sed -n '1,8p'
+        if timeout 5 ros2 topic echo --once "${topic}" --field header >/dev/null 2>&1; then
+            echo "first frame: ok"
+        else
+            echo "first frame: missing"
+        fi
+        timeout 3 ros2 topic hz "${topic}" || true
     else
         echo
         echo "${topic}: missing"

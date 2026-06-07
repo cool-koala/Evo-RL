@@ -43,23 +43,30 @@ class CobotMagicRosFollowerConfig(RobotConfig):
 
     left_state_topic: str = "/cobot_magic/puppet/joint_left"
     right_state_topic: str = "/cobot_magic/puppet/joint_right"
+    left_ee_state_topic: str = "/cobot_magic/puppet/end_left"
+    right_ee_state_topic: str = "/cobot_magic/puppet/end_right"
     left_command_topic: str = "/cobot_magic/command/joint_left"
     right_command_topic: str = "/cobot_magic/command/joint_right"
     cameras: dict[str, CobotMagicRosCameraConfig] = field(default_factory=_default_cameras)
     sync_gripper: bool = True
+    # For real Cobot Magic teleoperation, the ROS2 C++ follower nodes subscribe directly to leader
+    # JointState topics at their 200 Hz control rate. Keep this false while recording demonstrations.
+    send_actions: bool = False
     # Clip every commanded joint target relative to the latest ROS JointState.
     # This is a last-resort hardware safety guard for policy/HIL runs.
     max_relative_target: float | None = 0.05
     node_name: str = "lerobot_cobot_magic_ros_follower"
     subscriber_queue_size: int = 10
     publisher_queue_size: int = 10
-    read_timeout_s: float = 1.0
+    read_timeout_s: float = 5.0
     poll_interval_s: float = 0.01
 
     def __post_init__(self):
         super().__post_init__()
         if self.left_state_topic == self.right_state_topic:
             raise ValueError("Cobot Magic ROS left and right state topics must be different.")
+        if self.left_ee_state_topic == self.right_ee_state_topic:
+            raise ValueError("Cobot Magic ROS left and right EE state topics must be different.")
         if self.left_command_topic == self.right_command_topic:
             raise ValueError("Cobot Magic ROS left and right command topics must be different.")
         if self.read_timeout_s < 0:

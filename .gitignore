@@ -60,14 +60,12 @@ __pycache__/
 third_party/cobot_magic_ros_runtime/remote_control/**/devel/
 third_party/cobot_magic_ros_runtime/remote_control/**/install/
 third_party/cobot_magic_ros_runtime/remote_control/**/log/
-third_party/cobot_magic_ros_runtime/remote_control/**/.catkin_workspace
 third_party/cobot_magic_ros_runtime/remote_control/**/src/CMakeLists.txt
 third_party/cobot_magic_ros_runtime/camera_ws/build/
-third_party/cobot_magic_ros_runtime/camera_ws/devel/
 third_party/cobot_magic_ros_runtime/camera_ws/install/
 third_party/cobot_magic_ros_runtime/camera_ws/log/
-third_party/cobot_magic_ros_runtime/camera_ws/.catkin_workspace
 third_party/cobot_magic_ros_runtime/camera_ws/src/CMakeLists.txt
+third_party/cobot_magic_ros_runtime/.run/
 *.sage.py
 .cache/
 .ruff_cache/

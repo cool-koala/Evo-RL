@@ -15,7 +15,7 @@ public:
     int buttons_[11] = {0};
     clock_t rv_time_ = clock();
 private:
-    void joyCallback(const sensor_msgs::Joy::ConstPtr &joy);
+    void joyCallback(const sensor_msgs::Joy::ConstSharedPtr &joy);
     // ros::NodeHandle& nh_;
     ros::Subscriber joy_sub_;
 };
