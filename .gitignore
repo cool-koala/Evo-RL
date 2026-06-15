@@ -188,3 +188,6 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# OpenPI
+openpi/
