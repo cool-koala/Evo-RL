@@ -133,12 +133,7 @@ void arx_arm::update_real(command cmd)
             // 直接使用 ros_control_pos_t 作为目标位置
             for(int i = 0; i < 7; i++)
             {
-                //if (i == 6) {
-                    // 夹爪位置需要从ROS单位(0-4.5)转换回内部单位(0-54)
-                    //target_pos[i] = ros_control_pos_t[i] * 12;
-                //} else {
-                    //target_pos[i] = ros_control_pos_t[i];
-                //}
+                target_pos[i] = ros_control_pos_t[i];
             }
             motor_control();
         }
@@ -604,4 +599,3 @@ void arx_arm::limit_joint(float* Set_Pos)
         Set_Pos[6] = limit<float>(Set_Pos[6], solve.Lower_Joint[6], solve.Upper_Joint[6]);
 
 }
-

@@ -22,7 +22,6 @@ from typing import Any
 
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.processor import RobotAction, RobotObservation
-from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.utils.arx5_sdk import (
     ARX5_ACTION_KEYS,
     ARX5_GRIPPER_KEY,
@@ -120,7 +119,7 @@ class _CobotMagicArm:
     def _current_action(self) -> RobotAction:
         return arx5_state_to_action(self._read_state(), include_gripper=True)
 
-    def _build_safe_action(self, action: RobotAction) -> RobotAction:
+    def _build_action(self, action: RobotAction) -> RobotAction:
         current = self._current_action()
         target = dict(current)
 
@@ -135,26 +134,19 @@ class _CobotMagicArm:
         if self.config.sync_gripper and ARX5_GRIPPER_KEY in action:
             target[ARX5_GRIPPER_KEY] = float(action[ARX5_GRIPPER_KEY])
 
-        # 用当前状态做相对限幅，防止一次 send_action 把真实机械臂拉到很远的位置。
-        safety_keys = ARX5_ACTION_KEYS if self.config.sync_gripper else ARX5_JOINT_ACTION_KEYS
-        goal_present = {key: (target[key], current[key]) for key in safety_keys}
-        max_relative_target = self.config.max_relative_target
-        if not isinstance(max_relative_target, dict):
-            max_relative_target = float(max_relative_target)
-        safe_action = ensure_safe_goal_position(goal_present, max_relative_target)
         if not self.config.sync_gripper:
             # 夹爪不同步时不对外暴露 gripper action，但底层 JointState 仍要填当前位置来保持夹爪。
-            safe_action[ARX5_GRIPPER_KEY] = current[ARX5_GRIPPER_KEY]
-        return safe_action
+            target[ARX5_GRIPPER_KEY] = current[ARX5_GRIPPER_KEY]
+        return target
 
     def send_action(self, action: RobotAction) -> RobotAction:
         controller = self._require_controller()
-        safe_action = self._build_safe_action(action)
-        cmd = make_arx5_joint_state(self._arx5, self._joint_dof, safe_action)
+        sent_action = self._build_action(action)
+        cmd = make_arx5_joint_state(self._arx5, self._joint_dof, sent_action)
         controller.set_joint_cmd(cmd)
         if not self.config.background_send_recv:
             controller.send_recv_once()
-        return safe_action
+        return sent_action
 
     def set_to_damping(self) -> None:
         if self.controller is not None:

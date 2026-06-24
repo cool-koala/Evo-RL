@@ -218,6 +218,7 @@ def predict_action(
     ):
         # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
         observation = prepare_observation_for_inference(observation, device, task, robot_type)
+        observation = _resize_observation_images_to_policy_features(observation, policy)
         observation = preprocessor(observation)
 
         # Compute the next action with the policy
@@ -227,6 +228,34 @@ def predict_action(
         action = postprocessor(action)
 
     return action
+
+
+def _resize_observation_images_to_policy_features(
+    observation: dict[str, Any],
+    policy: PreTrainedPolicy,
+) -> dict[str, Any]:
+    """Resize runtime camera tensors to the image shapes saved in the policy config."""
+    image_features = getattr(policy.config, "image_features", {}) or {}
+    for key, feature in image_features.items():
+        image = observation.get(key)
+        if not isinstance(image, torch.Tensor) or image.ndim != 4:
+            continue
+
+        shape = tuple(feature.shape)
+        if len(shape) != 3:
+            continue
+        _, target_h, target_w = shape
+        if tuple(image.shape[-2:]) == (target_h, target_w):
+            continue
+
+        observation[key] = torch.nn.functional.interpolate(
+            image,
+            size=(target_h, target_w),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+    return observation
 
 
 def init_keyboard_listener(

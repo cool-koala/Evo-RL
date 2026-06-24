@@ -52,9 +52,6 @@ class CobotMagicRosFollowerConfig(RobotConfig):
     # For real Cobot Magic teleoperation, the ROS2 C++ follower nodes subscribe directly to leader
     # JointState topics at their 200 Hz control rate. Keep this false while recording demonstrations.
     send_actions: bool = False
-    # Clip every commanded joint target relative to the latest ROS JointState.
-    # This is a last-resort hardware safety guard for policy/HIL runs.
-    max_relative_target: float | None = 0.05
     node_name: str = "lerobot_cobot_magic_ros_follower"
     subscriber_queue_size: int = 10
     publisher_queue_size: int = 10
@@ -73,8 +70,6 @@ class CobotMagicRosFollowerConfig(RobotConfig):
             raise ValueError("`read_timeout_s` must be >= 0.")
         if self.poll_interval_s <= 0:
             raise ValueError("`poll_interval_s` must be > 0.")
-        if self.max_relative_target is not None and self.max_relative_target <= 0:
-            raise ValueError("`max_relative_target` must be > 0 when provided.")
         for camera_name, camera in self.cameras.items():
             if not camera.topic:
                 raise ValueError(f"Cobot Magic ROS camera {camera_name!r} must define a topic.")

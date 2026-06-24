@@ -44,7 +44,6 @@ class BiSOFollower(Robot):
             calibration_dir=config.calibration_dir,
             port=config.left_arm_config.port,
             disable_torque_on_disconnect=config.left_arm_config.disable_torque_on_disconnect,
-            max_relative_target=config.left_arm_config.max_relative_target,
             use_degrees=config.left_arm_config.use_degrees,
             cameras=config.left_arm_config.cameras,
         )
@@ -54,7 +53,6 @@ class BiSOFollower(Robot):
             calibration_dir=config.calibration_dir,
             port=config.right_arm_config.port,
             disable_torque_on_disconnect=config.right_arm_config.disable_torque_on_disconnect,
-            max_relative_target=config.right_arm_config.max_relative_target,
             use_degrees=config.right_arm_config.use_degrees,
             cameras=config.right_arm_config.cameras,
         )

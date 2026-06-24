@@ -32,7 +32,6 @@ from lerobot.processor import RobotAction, RobotObservation
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from ..robot import Robot
-from ..utils import ensure_safe_goal_position
 from .config_lekiwi import LeKiwiConfig
 
 logger = logging.getLogger(__name__)
@@ -370,15 +369,11 @@ class LeKiwi(Robot):
     def send_action(self, action: RobotAction) -> RobotAction:
         """Command lekiwi to move to a target joint configuration.
 
-        The relative action magnitude may be clipped depending on the configuration parameter
-        `max_relative_target`. In this case, the action sent differs from original action.
-        Thus, this function always returns the action actually sent.
-
         Raises:
             RobotDeviceNotConnectedError: if robot is not connected.
 
         Returns:
-            RobotAction: the action sent to the motors, potentially clipped.
+            RobotAction: the action sent to the motors.
         """
 
         arm_goal_pos = {k: v for k, v in action.items() if k.endswith(".pos")}
@@ -387,14 +382,6 @@ class LeKiwi(Robot):
         base_wheel_goal_vel = self._body_to_wheel_raw(
             base_goal_vel["x.vel"], base_goal_vel["y.vel"], base_goal_vel["theta.vel"]
         )
-
-        # Cap goal position when too far away from present position.
-        # /!\ Slower fps expected due to reading from the follower.
-        if self.config.max_relative_target is not None:
-            present_pos = self.bus.sync_read("Present_Position", self.arm_motors)
-            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in arm_goal_pos.items()}
-            arm_safe_goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
-            arm_goal_pos = arm_safe_goal_pos
 
         # Send goal position to the actuators
         arm_goal_pos_raw = {k.replace(".pos", ""): v for k, v in arm_goal_pos.items()}

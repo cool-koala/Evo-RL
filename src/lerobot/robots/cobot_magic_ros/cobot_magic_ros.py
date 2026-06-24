@@ -232,15 +232,15 @@ class CobotMagicRosFollower(Robot):
 
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
-        return self._send_action(action, max_relative_target=self.config.max_relative_target)
+        return self._send_action(action)
 
     @check_if_not_connected
     def send_action_without_relative_limit(self, action: RobotAction) -> RobotAction:
-        """Send a trusted interpolated/manual action without per-frame relative clipping."""
+        """Send an interpolated/manual action through the same command path."""
 
-        return self._send_action(action, max_relative_target=None)
+        return self._send_action(action)
 
-    def _send_action(self, action: RobotAction, *, max_relative_target: float | None) -> RobotAction:
+    def _send_action(self, action: RobotAction) -> RobotAction:
         if self._ros is None:
             raise RuntimeError("Cobot Magic ROS follower is not connected.")
         spin_ros_once(self._ros, timeout_sec=0.0)
@@ -250,14 +250,12 @@ class CobotMagicRosFollower(Robot):
                 "left",
                 current_state=self._left_state,
                 sync_gripper=self.config.sync_gripper,
-                max_relative_target=None,
             )
             _, sent_right = build_ros_joint_positions(
                 action,
                 "right",
                 current_state=self._right_state,
                 sync_gripper=self.config.sync_gripper,
-                max_relative_target=None,
             )
             return {**action, **sent_left, **sent_right}
         left_positions, sent_left = build_ros_joint_positions(
@@ -265,14 +263,12 @@ class CobotMagicRosFollower(Robot):
             "left",
             current_state=self._left_state,
             sync_gripper=self.config.sync_gripper,
-            max_relative_target=max_relative_target,
         )
         right_positions, sent_right = build_ros_joint_positions(
             action,
             "right",
             current_state=self._right_state,
             sync_gripper=self.config.sync_gripper,
-            max_relative_target=max_relative_target,
         )
         self._left_command_publisher.publish(make_joint_state_message(self._ros, left_positions))
         self._right_command_publisher.publish(make_joint_state_message(self._ros, right_positions))

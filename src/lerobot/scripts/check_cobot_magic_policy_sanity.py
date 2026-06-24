@@ -27,6 +27,7 @@ import numpy as np
 import torch
 
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs.types import FeatureType
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.utils import make_robot_action
@@ -37,8 +38,7 @@ DEFAULT_DATASET_ROOT = Path("data/cobot_magic_open_drawer_local_bimanual_v1/lero
 DEFAULT_REPO_ID = "local/cobot_magic_open_drawer_local_bimanual_v1"
 
 
-def item_to_inference_observation(item: dict[str, Any]) -> dict[str, np.ndarray]:
-    image = item["observation.images.cam_left_wrist"]
+def image_to_inference_array(image: Any) -> np.ndarray:
     if isinstance(image, torch.Tensor):
         if image.ndim == 3 and image.shape[0] in {1, 3, 4}:
             image = image[:3].permute(1, 2, 0)
@@ -47,14 +47,25 @@ def item_to_inference_observation(item: dict[str, Any]) -> dict[str, np.ndarray]
         image_np = np.asarray(image)
     if np.issubdtype(image_np.dtype, np.floating):
         image_np = np.clip(image_np, 0.0, 1.0) * 255.0
+    return image_np.astype(np.uint8)
 
+
+def policy_visual_feature_keys(cfg: PreTrainedConfig) -> list[str]:
+    return [
+        key
+        for key, feature in cfg.input_features.items()
+        if getattr(feature, "type", None) is FeatureType.VISUAL
+    ]
+
+
+def item_to_inference_observation(item: dict[str, Any], image_keys: list[str]) -> dict[str, np.ndarray]:
     state = item[OBS_STATE]
     state_np = state.detach().cpu().numpy() if isinstance(state, torch.Tensor) else np.asarray(state)
 
-    return {
-        OBS_STATE: state_np.astype(np.float32),
-        "observation.images.cam_left_wrist": image_np.astype(np.uint8),
-    }
+    observation = {OBS_STATE: state_np.astype(np.float32)}
+    for key in image_keys:
+        observation[key] = image_to_inference_array(item[key])
+    return observation
 
 
 def state_position_indices_for_actions(action_names: list[str], state_names: list[str]) -> list[int]:
@@ -102,6 +113,10 @@ def run_check(args: argparse.Namespace) -> dict[str, Any]:
         dataset_stats=dataset.meta.stats,
         preprocessor_overrides={"device_processor": {"device": cfg.device}},
     )
+    image_keys = policy_visual_feature_keys(cfg)
+    missing_image_keys = [key for key in image_keys if key not in dataset.features]
+    if missing_image_keys:
+        raise ValueError(f"Dataset is missing policy visual input keys: {missing_image_keys}")
 
     action_names = list(dataset.features[ACTION]["names"])
     state_names = list(dataset.features[OBS_STATE]["names"])
@@ -125,7 +140,7 @@ def run_check(args: argparse.Namespace) -> dict[str, Any]:
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
-        observation = item_to_inference_observation(item)
+        observation = item_to_inference_observation(item, image_keys)
         predicted_action_tensor = predict_action(
             observation,
             policy,
@@ -184,6 +199,7 @@ def run_check(args: argparse.Namespace) -> dict[str, Any]:
         "dataset_root": str(args.dataset_root),
         "policy_path": str(args.policy_path),
         "policy_type": cfg.type,
+        "visual_feature_keys": image_keys,
         "num_samples": len(indices),
         "max_abs_pred_minus_action": summarize(max_action_errors),
         "max_abs_pred_minus_state_pos": summarize(max_target_deltas_all),

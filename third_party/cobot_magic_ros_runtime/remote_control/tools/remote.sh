@@ -16,12 +16,29 @@ set -u
 echo "Refreshing CAN interfaces..."
 "${workspace}/tools/can.sh"
 
+FOLLOWER_INPUT="${FOLLOWER_INPUT:-leader}"
+case "${FOLLOWER_INPUT}" in
+    leader)
+        left_follower_command_topic="/cobot_magic/leader/joint_left"
+        right_follower_command_topic="/cobot_magic/leader/joint_right"
+        ;;
+    policy|command)
+        left_follower_command_topic="/cobot_magic/command/joint_left"
+        right_follower_command_topic="/cobot_magic/command/joint_right"
+        ;;
+    *)
+        echo "Unsupported FOLLOWER_INPUT='${FOLLOWER_INPUT}'. Use 'leader' or 'policy'."
+        exit 1
+        ;;
+esac
+
 echo "Starting Cobot Magic leader/follower ROS nodes."
+echo "Follower input mode: ${FOLLOWER_INPUT}"
 echo "Leader topics:  /cobot_magic/leader/joint_left|right"
 echo "Leader command: /cobot_magic/leader/command_joint_left|right"
 echo "Leader manual:  /cobot_magic/leader/manual_control_left|right"
 echo "Follower state: /cobot_magic/puppet/joint_left|right"
-echo "Follower direct input: /cobot_magic/leader/joint_left|right"
+echo "Follower input: ${left_follower_command_topic}|${right_follower_command_topic}"
 
 launch_terminal() {
     local title="$1"
@@ -56,16 +73,20 @@ sleep 1
 
 launch_arm "follow2_left_follower" follow2 \
     control_mode:=2 \
-    command_topic:=/cobot_magic/leader/joint_left
+    command_topic:="${left_follower_command_topic}"
 sleep 1
 launch_arm "follow1_right_follower" follow1 \
     control_mode:=2 \
-    command_topic:=/cobot_magic/leader/joint_right
+    command_topic:="${right_follower_command_topic}"
 
 echo "Nodes started. Check with:"
 echo "  ros2 topic hz /cobot_magic/leader/joint_left"
 echo "  ros2 topic hz /cobot_magic/puppet/joint_left"
-echo "  ros2 topic info /cobot_magic/leader/joint_left  # should show leader publisher and follower subscriber"
+if [[ "${FOLLOWER_INPUT}" == "leader" ]]; then
+    echo "  ros2 topic info /cobot_magic/leader/joint_left  # should show leader publisher and follower subscriber"
+else
+    echo "  ros2 topic info /cobot_magic/command/joint_left  # should show follower subscriber"
+fi
 echo "Leaders need about 4-5 seconds to finish initialization before gravity compensation starts."
 echo "Keep this terminal open; press Ctrl-C here to stop all arms and power off motors."
 

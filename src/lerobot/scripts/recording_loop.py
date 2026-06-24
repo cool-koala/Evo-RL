@@ -497,10 +497,7 @@ def record_loop(
         # Applies a pipeline to the action, default is IdentityProcessor
         robot_action_to_send = robot_action_processor((action_values, obs))
 
-        # Send action to robot
-        # Action can eventually be clipped using `max_relative_target`,
-        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
-        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+        # Send action to robot and save the action actually sent in the dataset.
         selected_from_policy = act_processed_policy is not None and action_values is act_processed_policy
         selected_from_teleop = (
             act_processed_teleop is not None and action_values is act_processed_teleop

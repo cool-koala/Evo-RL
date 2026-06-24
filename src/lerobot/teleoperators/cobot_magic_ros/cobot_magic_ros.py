@@ -344,7 +344,8 @@ class CobotMagicRosLeader(Teleoperator):
         if self._ros is None:
             raise RuntimeError("Cobot Magic ROS leader is not connected.")
 
-        self.set_manual_control(False)
+        if self._manual_control_enabled:
+            self.set_manual_control(False)
         left_positions, _ = build_ros_joint_positions(
             feedback,
             "left",

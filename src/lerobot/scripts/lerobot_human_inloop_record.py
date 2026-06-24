@@ -111,10 +111,15 @@ def human_inloop_record(cfg: RecordConfig):
     cfg.enable_collector_policy_id = True
     if cfg.collector_policy_id_policy is None:
         cfg.collector_policy_id_policy = infer_collector_policy_version(cfg.policy)
-    if cfg.policy is not None:
+    if cfg.policy is not None and not cfg.reset_after_episode:
         failure_reset_controller = _HumanInloopFailureResetController(cfg)
         cfg._on_record_connected = failure_reset_controller.on_record_connected
         cfg._on_record_episode_outcome = failure_reset_controller.on_episode_outcome
+    elif cfg.policy is not None:
+        logging.info(
+            "Skipping human-in-loop outcome reset because `reset_after_episode=true`; "
+            "`lerobot_record` will run the configured reset once after each labeled episode."
+        )
 
     logging.info(
         "Human-in-loop recording is enabled. Press '%s' to toggle takeover. "

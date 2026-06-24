@@ -66,10 +66,6 @@ class OpenArmFollowerConfigBase:
     # Whether to disable torque when disconnecting
     disable_torque_on_disconnect: bool = True
 
-    # Safety limit for relative target positions
-    # Set to a positive scalar for all motors, or a dict mapping motor names to limits
-    max_relative_target: float | dict[str, float] | None = None
-
     # Camera configurations
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 

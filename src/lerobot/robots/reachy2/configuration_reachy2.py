@@ -24,10 +24,6 @@ from ..config import RobotConfig
 @RobotConfig.register_subclass("reachy2")
 @dataclass
 class Reachy2RobotConfig(RobotConfig):
-    # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
-    # Set this to a positive scalar to have the same value for all motors.
-    max_relative_target: float | None = None
-
     # IP address of the Reachy 2 robot
     ip_address: str | None = "localhost"
     # Port of the Reachy 2 robot

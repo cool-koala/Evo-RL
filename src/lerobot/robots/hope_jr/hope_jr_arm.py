@@ -28,7 +28,6 @@ from lerobot.processor import RobotAction, RobotObservation
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from ..robot import Robot
-from ..utils import ensure_safe_goal_position
 from .config_hope_jr import HopeJrArmConfig
 
 logger = logging.getLogger(__name__)
@@ -149,13 +148,6 @@ class HopeJrArm(Robot):
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
         goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
-
-        # Cap goal position when too far away from present position.
-        # /!\ Slower fps expected due to reading from the follower.
-        if self.config.max_relative_target is not None:
-            present_pos = self.bus.sync_read("Present_Position")
-            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
-            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
         self.bus.sync_write("Goal_Position", goal_pos)
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}

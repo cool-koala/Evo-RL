@@ -50,8 +50,6 @@ class CobotMagicArmConfig:
     controller_dt: float | None = None
     # SDK 日志级别，对应 arx5_interface.LogLevel。
     log_level: str = "WARNING"
-    # 上层相对位移限幅，防止 policy 或 teleop 一帧内发送过大的目标跳变。
-    max_relative_target: float | dict[str, float] = 0.25
     # 是否同步夹爪；关闭后只控制 6 个手臂关节。
     sync_gripper: bool = True
     # 连接时是否回 home。真实机器人上自动回零可能有风险，所以默认关闭。
@@ -85,17 +83,6 @@ def validate_cobot_magic_arm_config(config: CobotMagicArmConfig) -> None:
         raise ValueError("Cobot Magic currently supports only `controller_type='joint_controller'`.")
     if config.controller_dt is not None and config.controller_dt <= 0:
         raise ValueError("`controller_dt` must be > 0 when provided.")
-    if isinstance(config.max_relative_target, int | float):
-        if config.max_relative_target <= 0:
-            raise ValueError("`max_relative_target` must be > 0.")
-    elif isinstance(config.max_relative_target, dict):
-        expected_keys = set(ARX5_ACTION_KEYS if config.sync_gripper else ARX5_JOINT_ACTION_KEYS)
-        if set(config.max_relative_target) != expected_keys:
-            raise ValueError("`max_relative_target` dict keys must match enabled Cobot Magic action keys.")
-        if any(value <= 0 for value in config.max_relative_target.values()):
-            raise ValueError("All `max_relative_target` values must be > 0.")
-    else:
-        raise TypeError("`max_relative_target` must be a positive number or a dict of positive numbers.")
 
 
 def make_arx5_joint_controller(config: CobotMagicArmConfig) -> Any:
