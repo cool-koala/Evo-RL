@@ -23,6 +23,8 @@ from typing import Any
 
 from lerobot.processor import RobotAction, RobotObservation
 from lerobot.utils.cobot_magic_ros import (
+    ROS_EE_COMMAND_NAMES,
+    build_ros_ee_positions,
     build_ros_joint_positions,
     ensure_ros_node,
     import_ros,
@@ -63,6 +65,8 @@ class CobotMagicRosFollower(Robot):
         self._subscribers: list[Any] = []
         self._left_command_publisher: Any | None = None
         self._right_command_publisher: Any | None = None
+        self._left_ee_command_publisher: Any | None = None
+        self._right_ee_command_publisher: Any | None = None
         self._is_connected = False
 
     @cached_property
@@ -104,6 +108,16 @@ class CobotMagicRosFollower(Robot):
         self._right_command_publisher = self._ros_node.create_publisher(
             self._ros.JointState,
             self.config.right_command_topic,
+            self.config.publisher_queue_size,
+        )
+        self._left_ee_command_publisher = self._ros_node.create_publisher(
+            self._ros.JointState,
+            self.config.left_ee_command_topic,
+            self.config.publisher_queue_size,
+        )
+        self._right_ee_command_publisher = self._ros_node.create_publisher(
+            self._ros.JointState,
+            self.config.right_ee_command_topic,
             self.config.publisher_queue_size,
         )
 
@@ -244,6 +258,11 @@ class CobotMagicRosFollower(Robot):
         if self._ros is None:
             raise RuntimeError("Cobot Magic ROS follower is not connected.")
         spin_ros_once(self._ros, timeout_sec=0.0)
+        if self.config.control_mode == "ee_pose":
+            return self._send_ee_action(action)
+        return self._send_joint_action(action)
+
+    def _send_joint_action(self, action: RobotAction) -> RobotAction:
         if not self.config.send_actions:
             _, sent_left = build_ros_joint_positions(
                 action,
@@ -274,17 +293,54 @@ class CobotMagicRosFollower(Robot):
         self._right_command_publisher.publish(make_joint_state_message(self._ros, right_positions))
         return {**action, **sent_left, **sent_right}
 
+    def _send_ee_action(self, action: RobotAction) -> RobotAction:
+        sent_left: RobotAction = {}
+        sent_right: RobotAction = {}
+        left_positions: list[float] | None = None
+        right_positions: list[float] | None = None
+        if self.config.left_arm_enabled:
+            left_positions, sent_left = build_ros_ee_positions(action, "left")
+        if self.config.right_arm_enabled:
+            right_positions, sent_right = build_ros_ee_positions(action, "right")
+        if not self.config.send_actions:
+            return {**action, **sent_left, **sent_right}
+
+        if left_positions is not None:
+            self._left_ee_command_publisher.publish(
+                make_joint_state_message(
+                    self._ros,
+                    left_positions,
+                    names=ROS_EE_COMMAND_NAMES,
+                )
+            )
+        if right_positions is not None:
+            self._right_ee_command_publisher.publish(
+                make_joint_state_message(
+                    self._ros,
+                    right_positions,
+                    names=ROS_EE_COMMAND_NAMES,
+                )
+            )
+        return {**action, **sent_left, **sent_right}
+
     def disconnect(self) -> None:
         try:
             for subscriber in self._subscribers:
                 if self._ros_node is not None:
                     self._ros_node.destroy_subscription(subscriber)
-            for publisher in (self._left_command_publisher, self._right_command_publisher):
+            for publisher in (
+                self._left_command_publisher,
+                self._right_command_publisher,
+                self._left_ee_command_publisher,
+                self._right_ee_command_publisher,
+            ):
                 if self._ros_node is not None and publisher is not None:
                     self._ros_node.destroy_publisher(publisher)
         finally:
             self._subscribers = []
             self._left_command_publisher = None
             self._right_command_publisher = None
+            self._left_ee_command_publisher = None
+            self._right_ee_command_publisher = None
             self._is_connected = False
             logger.info("%s disconnected.", self)

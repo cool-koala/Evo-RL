@@ -27,7 +27,8 @@ cam_right_wrist -> /camera_r/color/image_raw
 
 ## 启动本地机器人运行时
 
-打开一个终端，启动 Cobot Magic/X5 本地 ROS runtime。OpenPI 评测需要 follower 订阅 `/cobot_magic/command/*`，所以使用 policy 模式：
+打开一个终端，启动 Cobot Magic/X5 本地 ROS runtime。Joint policy 评测需要 follower 订阅
+`/cobot_magic/command/joint_*`，所以使用 policy 模式：
 
 ```bash
 cd /home/guoxiaoyu/Evo-RL
@@ -35,6 +36,17 @@ cd /home/guoxiaoyu/Evo-RL
 ```
 
 这个终端需要保持打开。脚本会启动/检查机械臂和相机。
+
+如果要评测 EE pose policy，不启动旧 C++ follower，从本仓库启动 ARX5 Cartesian bridge：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+./scripts/cobot_magic_policy.sh control_mode:=ee_pose start_client:=false send_actions:=false
+```
+
+EE bridge 订阅 `/cobot_magic/command/ee_left|right`，并继续发布
+`/cobot_magic/puppet/joint_left|right` 和 `/cobot_magic/puppet/end_left|right`，所以观测和录制 schema
+仍兼容现有 OpenPI/LeRobot 路径。
 
 如果相机已经单独启动，或只想重启机械臂：
 
@@ -62,7 +74,8 @@ cd /home/guoxiaoyu/Evo-RL
 - OpenPI websocket server 是否可连接
 - 三路 ROS2 相机 topic 是否有图像帧
 - Cobot Magic leader/follower state topic 是否有数据
-- `/cobot_magic/command/joint_left` 和 `/cobot_magic/command/joint_right` 是否有 subscriber
+- 当前控制模式对应的 command topic 是否有 subscriber：joint 为
+  `/cobot_magic/command/joint_left|right`，EE 为 `/cobot_magic/command/ee_left|right`
 
 如果相机已经在运行，并且不希望脚本重启相机：
 
@@ -102,6 +115,26 @@ Esc: stop early
 SEND_ACTIONS=false RECORD=false ./scripts/eval_cobot_magic_cube_into_drawer_openpi.sh dry-run
 ```
 
+EE pose policy dry-run：
+
+```bash
+CONTROL_MODE=ee_pose \
+SEND_ACTIONS=false \
+RECORD=false \
+EE_PORT=5353 \
+./scripts/eval_cobot_magic_cube_into_drawer_openpi.sh dry-run
+```
+
+真实 EE pose 评测必须显式打开动作：
+
+```bash
+CONTROL_MODE=ee_pose \
+SEND_ACTIONS=true \
+RECORD=true \
+EE_PORT=5353 \
+./scripts/eval_cobot_magic_cube_into_drawer_openpi.sh hil
+```
+
 ## 当前有效默认参数
 
 `scripts/eval_cobot_magic_cube_into_drawer_openpi.sh` 已经把当前有效参数设为默认：
@@ -109,6 +142,8 @@ SEND_ACTIONS=false RECORD=false ./scripts/eval_cobot_magic_cube_into_drawer_open
 ```text
 HOST=115.190.52.37
 JOINT_PORT=5352
+EE_PORT=5353
+CONTROL_MODE=joint
 INPUT_FORMAT=aloha
 OPENPI_STATE_FORMAT=observation56
 IMAGE_SIZE=224
@@ -124,6 +159,20 @@ SWAP_JOINT_ARMS=true
 - `SWAP_JOINT_ARMS=true`：当前远程 server 返回的 14 维 joint action 是 `right arm 7 + left arm 7`，本地 Cobot Magic action schema 是 `left arm 7 + right arm 7`，客户端必须交换后再发给机器人。
 - `ACTION_HORIZON=16` 和 `PREFETCH_REMAINING_STEPS=0`：每次完整执行一个 16 步 action chunk，不提前切换到下一段 chunk。
 - `POLICY_RELATIVE_LIMIT=false`：OpenPI policy action 默认不走机器人相对动作限幅，避免把模型输出截断成不符合训练分布的动作。
+- `CONTROL_MODE=joint|ee_pose`：选择真实执行 joint 14D action 还是 EE 14D action。EE action 是绝对
+  `x,y,z,wx,wy,wz,gripper`，其中 `wx/wy/wz` 是 ARX 6D pose 后三维，不是 ROS quaternion。
+
+## 依赖说明
+
+EE bridge 依赖 `arx5-interface`：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+pip install -e ".[cobot_magic]"
+```
+
+这个包包含 Cartesian controller 和 IK solver；默认不把 `real-stanford/arx5-sdk` 作为 git submodule
+放进 Evo-RL。
 
 ## 图像处理
 

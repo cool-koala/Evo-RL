@@ -79,8 +79,8 @@ def validate_cobot_magic_arm_config(config: CobotMagicArmConfig) -> None:
         raise ValueError("`model` must be a non-empty ARX robot model, e.g. 'X5'.")
     if not config.interface:
         raise ValueError("`interface` must be a non-empty CAN/EtherCAT interface name.")
-    if config.controller_type != "joint_controller":
-        raise ValueError("Cobot Magic currently supports only `controller_type='joint_controller'`.")
+    if config.controller_type not in {"joint_controller", "cartesian_controller"}:
+        raise ValueError("Cobot Magic supports `joint_controller` or `cartesian_controller`.")
     if config.controller_dt is not None and config.controller_dt <= 0:
         raise ValueError("`controller_dt` must be > 0 when provided.")
 
@@ -107,6 +107,52 @@ def make_arx5_joint_controller(config: CobotMagicArmConfig) -> Any:
     controller = arx5.Arx5JointController(robot_config, controller_config, config.interface)
     set_arx5_log_level(controller, config.log_level, arx5)
     return controller
+
+
+def make_arx5_cartesian_controller(config: CobotMagicArmConfig) -> Any:
+    """Create an ARX SDK Cartesian controller for absolute EE pose targets."""
+
+    arx5 = get_arx5_sdk()
+
+    robot_config = arx5.RobotConfigFactory.get_instance().get_config(config.model)
+    controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
+        "cartesian_controller",
+        robot_config.joint_dof,
+    )
+    controller_config.background_send_recv = config.background_send_recv
+    controller_config.gravity_compensation = config.gravity_compensation
+
+    if hasattr(controller_config, "shutdown_to_passive"):
+        controller_config.shutdown_to_passive = config.shutdown_to_passive
+    if config.controller_dt is not None:
+        controller_config.controller_dt = config.controller_dt
+
+    controller = arx5.Arx5CartesianController(robot_config, controller_config, config.interface)
+    set_arx5_log_level(controller, config.log_level, arx5)
+    return controller
+
+
+def arx5_eef_state_to_pose(state: Any) -> RobotObservation:
+    """Flatten an ARX EEFState into LeRobot EE pose keys without an arm prefix."""
+
+    pose_6d = np.asarray(state.pose_6d(), dtype=np.float64)
+    return {
+        "ee.x": float(pose_6d[0]),
+        "ee.y": float(pose_6d[1]),
+        "ee.z": float(pose_6d[2]),
+        "ee.wx": float(pose_6d[3]),
+        "ee.wy": float(pose_6d[4]),
+        "ee.wz": float(pose_6d[5]),
+        "ee.gripper_pos": float(getattr(state, "gripper_pos", 0.0)),
+    }
+
+
+def make_arx5_eef_state(arx5: ModuleType, ee_pose: list[float]) -> Any:
+    """Build an SDK EEFState from [x, y, z, wx, wy, wz, gripper]."""
+
+    if len(ee_pose) != 7:
+        raise ValueError(f"ARX5 EE pose command must have 7 values, got {len(ee_pose)}.")
+    return arx5.EEFState(np.asarray(ee_pose[:6], dtype=np.float64), float(ee_pose[6]))
 
 
 def set_arx5_log_level(controller: Any, log_level: str, arx5: ModuleType | None = None) -> None:

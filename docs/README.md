@@ -320,7 +320,87 @@ chunk 边界卡顿，`--prefetch-remaining-steps 8` 会在当前 chunk 还剩 8 
 
 这只会记录 EE shadow action，不会把 EE pose 动作发给机械臂。
 
-## 12. 常见问题
+## 12. OpenPI 远程 EE pose policy
+
+EE pose 控制不使用旧 C++ follower runtime 抢占从臂 CAN。依赖通过 Evo-RL 的 `cobot_magic`
+extra 安装：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+pip install -e ".[cobot_magic]"
+```
+
+这个安装会拉取 `arx5-interface`，其中包含 `Arx5CartesianController`、`EEFState` 和
+`Arx5Solver.inverse_kinematics`。默认不要把 `real-stanford/arx5-sdk` 作为子项目提交进仓库；
+只有需要改 SDK 源码时才在本机单独 clone 并 editable install。
+
+先启动本机 EE bridge，首次只 dry-run：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+./scripts/cobot_magic_policy.sh control_mode:=ee_pose start_client:=false send_actions:=false
+```
+
+另开终端检查状态和命令 topic：
+
+```bash
+ros2 topic echo --once /cobot_magic/puppet/end_left
+ros2 topic echo --once /cobot_magic/puppet/end_right
+ros2 topic info /cobot_magic/command/ee_left
+ros2 topic info /cobot_magic/command/ee_right
+```
+
+连接远程 EE policy server 但不移动机械臂：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate evo-rl-ros2-jazzy
+source /opt/ros/jazzy/setup.bash
+
+CONTROL_MODE=ee_pose \
+SEND_ACTIONS=false \
+RECORD=false \
+EE_PORT=5353 \
+./scripts/eval_cobot_magic_cube_into_drawer_openpi.sh dry-run
+```
+
+真实执行必须显式开启动作：
+
+```bash
+CONTROL_MODE=ee_pose \
+SEND_ACTIONS=true \
+RECORD=true \
+EE_PORT=5353 \
+./scripts/eval_cobot_magic_cube_into_drawer_openpi.sh hil
+```
+
+EE action 是绝对 7D pose：`x,y,z,wx,wy,wz,gripper`。`wx/wy/wz` 沿用当前 ARX runtime
+的 6D pose 后三维语义，不是 ROS quaternion。数据集仍保存 28D action，其中 joint 维度由当前观测填充，
+EE 维度来自 policy。
+
+## 13. 一键 policy launcher
+
+`scripts/cobot_magic_policy.sh` 是本机一键入口：
+
+```bash
+# joint 模式：启动旧 ROS follower runtime
+./scripts/cobot_magic_policy.sh control_mode:=joint start_client:=false
+
+# EE 模式：启动相机和 ARX5 Cartesian bridge
+./scripts/cobot_magic_policy.sh control_mode:=ee_pose start_client:=false send_actions:=false
+
+# EE 模式同时启动本地 OpenPI client dry-run
+./scripts/cobot_magic_policy.sh control_mode:=ee_pose start_client:=true send_actions:=false
+```
+
+如果环境已经 source 好，也可以用 launch 文件：
+
+```bash
+ros2 launch launch/cobot_magic_policy.launch.py control_mode:=ee_pose start_client:=false send_actions:=false
+```
+
+## 14. 常见问题
 
 没有 `/cobot_magic` topic：
 

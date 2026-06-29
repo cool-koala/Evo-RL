@@ -26,6 +26,9 @@ from lerobot.processor import RobotAction, RobotObservation
 from lerobot.utils.arx5_sdk import ARX5_ACTION_KEYS, ARX5_GRIPPER_KEY, ARX5_JOINT_ACTION_KEYS
 
 ROS_JOINT_NAMES = tuple(f"joint{idx}" for idx in range(7))
+ROS_EE_COMMAND_NAMES = ("x", "y", "z", "wx", "wy", "wz", "gripper")
+EE_POSE_KEYS = ("ee.x", "ee.y", "ee.z", "ee.wx", "ee.wy", "ee.wz", "ee.gripper_pos")
+EE_POSE_ACTION_KEYS = tuple(key.removeprefix("ee.") for key in EE_POSE_KEYS)
 
 
 @dataclass
@@ -123,9 +126,6 @@ def prefixed_observation_features(prefix: str) -> dict[str, type]:
     return features
 
 
-EE_POSE_KEYS = ("ee.x", "ee.y", "ee.z", "ee.wx", "ee.wy", "ee.wz", "ee.gripper_pos")
-
-
 def prefixed_ee_pose_features(prefix: str) -> dict[str, type]:
     return {f"{prefix}_{key}": float for key in EE_POSE_KEYS}
 
@@ -213,16 +213,99 @@ def build_ros_joint_positions(
     positions.append(gripper_pos)
     return positions, sent
 
-def make_joint_state_message(ros: RosImports, positions: list[float]) -> Any:
+
+def build_ros_ee_positions(action: RobotAction, prefix: str) -> tuple[list[float], RobotAction]:
+    """Convert LeRobot EE action keys into a ROS JointState position vector."""
+
+    sent: RobotAction = {}
+    positions: list[float] = []
+    missing = []
+    for key in EE_POSE_KEYS:
+        prefixed_key = f"{prefix}_{key}"
+        if prefixed_key not in action:
+            missing.append(prefixed_key)
+            continue
+        value = float(action[prefixed_key])
+        positions.append(value)
+        sent[prefixed_key] = value
+
+    if missing:
+        raise KeyError(f"Cobot Magic ROS action is missing required EE pose keys: {missing}")
+    return positions, sent
+
+
+def ee_pose_from_observation(obs: RobotObservation, prefix: str) -> list[float]:
+    return [float(obs[f"{prefix}_{key}"]) for key in EE_POSE_KEYS]
+
+
+def clamp_ee_pose_step(
+    target: list[float],
+    current: list[float],
+    *,
+    max_xyz_step_m: float,
+    max_rot_step: float,
+    max_gripper_step: float,
+    workspace_min: tuple[float, float, float] | None = None,
+    workspace_max: tuple[float, float, float] | None = None,
+) -> list[float]:
+    """Clamp an absolute EE target by per-step deltas and optional xyz workspace bounds."""
+
+    if len(target) != len(ROS_EE_COMMAND_NAMES) or len(current) != len(ROS_EE_COMMAND_NAMES):
+        raise ValueError("EE target and current pose must both have 7 values.")
+    limits = [max_xyz_step_m] * 3 + [max_rot_step] * 3 + [max_gripper_step]
+    clamped: list[float] = []
+    for value, current_value, limit in zip(target, current, limits, strict=True):
+        if limit == 0:
+            clamped.append(float(current_value))
+            continue
+        delta = float(value) - float(current_value)
+        delta = min(max(delta, -limit), limit)
+        clamped.append(float(current_value) + delta)
+
+    if workspace_min is not None and workspace_max is not None:
+        for idx, (lo, hi) in enumerate(zip(workspace_min, workspace_max, strict=True)):
+            clamped[idx] = min(max(clamped[idx], float(lo)), float(hi))
+    return clamped
+
+
+def make_joint_state_message(
+    ros: RosImports,
+    positions: list[float],
+    *,
+    names: tuple[str, ...] = ROS_JOINT_NAMES,
+    node: Any | None = None,
+) -> Any:
+    if len(positions) != len(names):
+        raise ValueError(f"Expected {len(names)} JointState positions for names={names}, got {len(positions)}.")
     msg = ros.JointState()
     msg.header = ros.Header()
-    if _ROS2_NODE is None:
+    stamp_node = node or _ROS2_NODE
+    if stamp_node is None:
         raise RuntimeError("Cobot Magic ROS2 node has not been initialized.")
-    msg.header.stamp = _ROS2_NODE.get_clock().now().to_msg()
-    msg.name = list(ROS_JOINT_NAMES)
+    msg.header.stamp = stamp_node.get_clock().now().to_msg()
+    msg.name = list(names)
     msg.position = [float(value) for value in positions]
     msg.velocity = []
     msg.effort = []
+    return msg
+
+
+def make_pose_stamped_message(ros: RosImports, ee_pose: list[float], *, node: Any | None = None) -> Any:
+    if len(ee_pose) != len(ROS_EE_COMMAND_NAMES):
+        raise ValueError(f"Expected 7 EE pose values, got {len(ee_pose)}.")
+    msg = ros.PoseStamped()
+    msg.header = ros.Header()
+    stamp_node = node or _ROS2_NODE
+    if stamp_node is None:
+        raise RuntimeError("Cobot Magic ROS2 node has not been initialized.")
+    msg.header.stamp = stamp_node.get_clock().now().to_msg()
+    msg.pose.position.x = float(ee_pose[0])
+    msg.pose.position.y = float(ee_pose[1])
+    msg.pose.position.z = float(ee_pose[2])
+    msg.pose.orientation.x = float(ee_pose[3])
+    msg.pose.orientation.y = float(ee_pose[4])
+    msg.pose.orientation.z = float(ee_pose[5])
+    msg.pose.orientation.w = float(ee_pose[6])
     return msg
 
 

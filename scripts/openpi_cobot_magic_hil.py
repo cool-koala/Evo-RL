@@ -1,10 +1,5 @@
 #!/usr/bin/env python
-"""Run Cobot Magic HIL against a remote openpi joint policy server.
-
-The joint server is the executable control path. EE-pose policy inference is
-disabled by default and can be queried as shadow-only debug data with
---enable-ee-shadow, but it is never sent to the robot.
-"""
+"""Run Cobot Magic HIL against remote openpi joint or EE-pose policy servers."""
 
 from __future__ import annotations
 
@@ -29,7 +24,10 @@ for path in (str(SRC_ROOT), str(OPENPI_CLIENT_SRC)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from lerobot.utils.recording_annotations import resolve_collector_policy_id, resolve_episode_success_label
+from lerobot.utils.recording_annotations import (  # noqa: E402
+    resolve_collector_policy_id,
+    resolve_episode_success_label,
+)
 
 
 ACTION = "action"
@@ -601,11 +599,17 @@ class RemoteOpenPiPolicy:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Cobot Magic HIL runner for an openpi joint websocket policy server."
+        description="Cobot Magic HIL runner for openpi joint or EE-pose websocket policy servers."
     )
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--joint-port", type=int, default=DEFAULT_JOINT_PORT)
     parser.add_argument("--ee-port", type=int, default=DEFAULT_EE_PORT)
+    parser.add_argument(
+        "--control-mode",
+        choices=("joint", "ee_pose"),
+        default="joint",
+        help="Policy action space to execute on the robot. joint preserves the existing behavior.",
+    )
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--connect-timeout-s", type=float, default=10.0)
     parser.add_argument("--request-timeout-s", type=float, default=30.0)
@@ -766,6 +770,7 @@ def make_robot(args: argparse.Namespace) -> Any:
 
     cfg = CobotMagicRosFollowerConfig(
         id="openpi_cobot_magic_hil_follower",
+        control_mode=args.control_mode,
         sync_gripper=True,
         send_actions=args.send_actions,
         read_timeout_s=5.0,
@@ -813,6 +818,10 @@ def current_hold_action(obs: dict[str, Any]) -> dict[str, float]:
     return {name: float(obs.get(name, 0.0)) for name in JOINT_ACTION_NAMES}
 
 
+def current_full_hold_action(obs: dict[str, Any]) -> dict[str, float]:
+    return {name: float(obs.get(name, 0.0)) for name in ACTION_NAMES}
+
+
 def full_action_from_joint_and_observation(
     joint_action: dict[str, float],
     obs: dict[str, Any],
@@ -820,6 +829,16 @@ def full_action_from_joint_and_observation(
     action = {name: float(joint_action[name]) for name in JOINT_ACTION_NAMES}
     for name in EE_ACTION_NAMES:
         action[name] = float(obs.get(name, 0.0))
+    return action
+
+
+def full_action_from_ee_and_observation(
+    ee_action: dict[str, float],
+    obs: dict[str, Any],
+) -> dict[str, float]:
+    action = {name: float(obs.get(name, 0.0)) for name in JOINT_ACTION_NAMES}
+    for name in EE_ACTION_NAMES:
+        action[name] = float(ee_action[name])
     return action
 
 
@@ -831,7 +850,7 @@ def full_action_from_teleop(teleop_action: dict[str, Any], obs: dict[str, Any]) 
 
 
 def zero_full_action() -> dict[str, float]:
-    return {name: 0.0 for name in ACTION_NAMES}
+    return dict.fromkeys(ACTION_NAMES, 0.0)
 
 
 def ee_shadow_action_from_step(step: PolicyStep | None, obs: dict[str, Any]) -> dict[str, float]:
@@ -844,6 +863,34 @@ def openpi_joint_action_names(args: argparse.Namespace) -> tuple[str, ...]:
     if args.swap_joint_arms:
         return tuple(OPENPI_SWAPPED_JOINT_ACTION_NAMES)
     return tuple(JOINT_ACTION_NAMES)
+
+
+def openpi_ee_action_names(args: argparse.Namespace) -> tuple[str, ...]:
+    if args.swap_joint_arms:
+        return (*EE_ACTION_NAMES[7:14], *EE_ACTION_NAMES[0:7])
+    return tuple(EE_ACTION_NAMES)
+
+
+def executable_action_names(args: argparse.Namespace) -> tuple[str, ...]:
+    if args.control_mode == "joint":
+        return openpi_joint_action_names(args)
+    return openpi_ee_action_names(args)
+
+
+def full_action_from_policy_step(step: PolicyStep, obs: dict[str, Any], control_mode: str) -> dict[str, float]:
+    if control_mode == "joint":
+        return full_action_from_joint_and_observation(step.action, obs)
+    if control_mode == "ee_pose":
+        return full_action_from_ee_and_observation(step.action, obs)
+    raise ValueError(f"Unsupported control_mode={control_mode!r}.")
+
+
+def controlled_action_names(control_mode: str) -> list[str]:
+    if control_mode == "joint":
+        return JOINT_ACTION_NAMES
+    if control_mode == "ee_pose":
+        return EE_ACTION_NAMES
+    raise ValueError(f"Unsupported control_mode={control_mode!r}.")
 
 
 def _ensure_hwc_uint8(image: np.ndarray) -> np.ndarray:
@@ -899,6 +946,7 @@ def add_frame(
     is_intervention: bool,
     intervention_state: float,
     selected_from_policy: bool,
+    control_mode: str,
     task: str,
 ) -> None:
     if dataset is None:
@@ -931,7 +979,7 @@ def add_frame(
             intervention_enabled=True,
             is_intervention=is_intervention,
             selected_from_policy=selected_from_policy,
-            policy_id="openpi_joint",
+            policy_id=f"openpi_{control_mode}",
             human_id="human",
         )
     dataset.add_frame(frame)
@@ -952,7 +1000,7 @@ def run_reset_pause(
     deadline = time.monotonic() + duration_s
     while time.monotonic() < deadline:
         obs = robot.get_joint_observation()
-        robot.send_action_without_relative_limit(current_hold_action(obs))
+        robot.send_action_without_relative_limit(current_full_hold_action(obs))
         precise_sleep(1.0 / fps)
     if teleop is not None:
         teleop.set_manual_control(False)
@@ -989,14 +1037,14 @@ def toggle_intervention(
     *,
     teleop: Any | None,
     active: bool,
-    joint_policy: RemoteOpenPiPolicy,
+    policy: RemoteOpenPiPolicy,
     ee_policy: RemoteOpenPiPolicy | None,
 ) -> bool:
     next_active = not active
     if teleop is not None:
         teleop.set_manual_control(next_active)
     if not next_active:
-        joint_policy.reset()
+        policy.reset()
         if ee_policy is not None:
             ee_policy.reset()
     logging.info("Intervention %s.", "ACTIVE" if next_active else "released to policy")
@@ -1008,12 +1056,12 @@ def run_episode(
     args: argparse.Namespace,
     robot: Any,
     teleop: Any | None,
-    joint_policy: RemoteOpenPiPolicy,
+    policy: RemoteOpenPiPolicy,
     ee_policy: RemoteOpenPiPolicy | None,
     dataset: Any | None,
     events: dict[str, Any],
 ) -> str | None:
-    joint_policy.reset()
+    policy.reset()
     if ee_policy is not None:
         ee_policy.reset()
     if teleop is not None:
@@ -1034,7 +1082,7 @@ def run_episode(
             intervention_active = toggle_intervention(
                 teleop=teleop,
                 active=intervention_active,
-                joint_policy=joint_policy,
+                policy=policy,
                 ee_policy=ee_policy,
             )
 
@@ -1054,8 +1102,8 @@ def run_episode(
             policy_action_for_storage = last_policy_action
         else:
             try:
-                policy_step = joint_policy.infer_next(policy_obs)
-                action_to_send = full_action_from_joint_and_observation(policy_step.action, obs)
+                policy_step = policy.infer_next(policy_obs)
+                action_to_send = full_action_from_policy_step(policy_step, obs, args.control_mode)
                 policy_action_for_storage = dict(action_to_send)
                 last_policy_action = dict(action_to_send)
                 if args.policy_relative_limit:
@@ -1069,10 +1117,11 @@ def run_episode(
                     else:
                         max_delta = max(
                             abs(action_to_send[name] - last_policy_step_action.get(name, action_to_send[name]))
-                            for name in JOINT_ACTION_NAMES
+                            for name in controlled_action_names(args.control_mode)
                         )
                     logging.info(
-                        "policy_step chunk=%s step=%s/%s max_joint_delta=%.4f loop_ms=%.1f",
+                        "policy_step control_mode=%s chunk=%s step=%s/%s max_target_delta=%.4f loop_ms=%.1f",
+                        args.control_mode,
                         policy_step.chunk_id,
                         policy_step.chunk_step + 1,
                         policy_step.chunk_len,
@@ -1086,8 +1135,8 @@ def run_episode(
                     except Exception:
                         logging.exception("Failed to mirror policy action to leader.")
             except Exception:
-                logging.exception("Joint policy inference/control failed; holding current joint pose.")
-                action_to_send = full_action_from_joint_and_observation(current_hold_action(obs), obs)
+                logging.exception("%s policy inference/control failed; holding current pose.", args.control_mode)
+                action_to_send = current_full_hold_action(obs)
                 policy_action_for_storage = last_policy_action
                 sent_action = robot.send_action_without_relative_limit(action_to_send)
 
@@ -1113,6 +1162,7 @@ def run_episode(
             is_intervention=is_intervention,
             intervention_state=state_code,
             selected_from_policy=selected_from_policy,
+            control_mode=args.control_mode,
             task=args.task,
         )
 
@@ -1156,23 +1206,24 @@ def run(args: argparse.Namespace) -> None:
     else:
         reset_pose = None
         leader_reset_pose = None
-    joint_policy = RemoteOpenPiPolicy(
+    policy_port = args.joint_port if args.control_mode == "joint" else args.ee_port
+    policy = RemoteOpenPiPolicy(
         host=args.host,
-        port=args.joint_port,
-        action_names=openpi_joint_action_names(args),
+        port=policy_port,
+        action_names=executable_action_names(args),
         action_horizon=args.action_horizon,
         connect_timeout_s=args.connect_timeout_s,
         request_timeout_s=args.request_timeout_s,
         action_offset=0,
         prefetch_remaining_steps=args.prefetch_remaining_steps,
         api_key=args.api_key,
-        name="openpi_joint",
+        name=f"openpi_{args.control_mode}",
     )
     ee_policy = (
         RemoteOpenPiPolicy(
             host=args.host,
             port=args.ee_port,
-            action_names=EE_ACTION_NAMES,
+            action_names=openpi_ee_action_names(args),
             action_horizon=args.action_horizon,
             connect_timeout_s=args.connect_timeout_s,
             request_timeout_s=args.request_timeout_s,
@@ -1181,7 +1232,7 @@ def run(args: argparse.Namespace) -> None:
             api_key=args.api_key,
             name="openpi_ee_shadow",
         )
-        if args.enable_ee_shadow
+        if args.enable_ee_shadow and args.control_mode != "ee_pose"
         else None
     )
 
@@ -1193,8 +1244,8 @@ def run(args: argparse.Namespace) -> None:
             teleop.connect()
             teleop.set_manual_control(False)
 
-        logging.info("Connecting openpi joint server %s:%s.", args.host, args.joint_port)
-        joint_policy.connect()
+        logging.info("Connecting openpi %s server %s:%s.", args.control_mode, args.host, policy_port)
+        policy.connect()
         if ee_policy is not None:
             logging.info("Connecting openpi EE shadow server %s:%s.", args.host, args.ee_port)
             ee_policy.connect()
@@ -1210,10 +1261,10 @@ def run(args: argparse.Namespace) -> None:
             for _ in range(args.warmup_inferences):
                 obs = robot.get_observation()
                 policy_obs = build_openpi_observation(obs, args)
-                joint_policy.infer_next(policy_obs)
+                policy.infer_next(policy_obs)
                 if ee_policy is not None:
                     ee_policy.infer_next(policy_obs)
-            joint_policy.reset()
+            policy.reset()
             if ee_policy is not None:
                 ee_policy.reset()
 
@@ -1222,15 +1273,16 @@ def run(args: argparse.Namespace) -> None:
             for _ in range(args.dry_run_steps):
                 obs = robot.get_observation()
                 policy_obs = build_openpi_observation(obs, args)
-                joint_step = joint_policy.infer_next(policy_obs)
+                policy_step = policy.infer_next(policy_obs)
                 ee_step = ee_policy.infer_next(policy_obs) if ee_policy is not None else None
                 logging.info(
-                    "dry-run joint_dim=%s ee_dim=%s first_joint=%.4f",
-                    joint_step.raw_vector.shape,
+                    "dry-run control_mode=%s action_dim=%s ee_shadow_dim=%s first_action=%.4f",
+                    args.control_mode,
+                    policy_step.raw_vector.shape,
                     None if ee_step is None else ee_step.raw_vector.shape,
-                    joint_step.raw_vector[0],
+                    policy_step.raw_vector[0],
                 )
-                robot.send_action_without_relative_limit(current_hold_action(obs))
+                robot.send_action_without_relative_limit(current_full_hold_action(obs))
                 precise_sleep(1.0 / args.fps)
             return
 
@@ -1263,7 +1315,7 @@ def run(args: argparse.Namespace) -> None:
                 args=args,
                 robot=robot,
                 teleop=teleop,
-                joint_policy=joint_policy,
+                policy=policy,
                 ee_policy=ee_policy,
                 dataset=dataset,
                 events=events,
@@ -1315,7 +1367,7 @@ def run(args: argparse.Namespace) -> None:
 
         logging.info("Finished. recorded=%s requested=%s episodes_started=%s", recorded, args.num_episodes, episode_idx)
     finally:
-        joint_policy.close()
+        policy.close()
         if ee_policy is not None:
             ee_policy.close()
         if listener is not None:

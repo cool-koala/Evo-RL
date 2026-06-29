@@ -9,6 +9,7 @@ CONDA_SH="${CONDA_SH:-${HOME}/anaconda3/etc/profile.d/conda.sh}"
 HOST="${HOST:-115.190.52.37}"
 JOINT_PORT="${JOINT_PORT:-5352}"
 EE_PORT="${EE_PORT:-5353}"
+CONTROL_MODE="${CONTROL_MODE:-joint}"
 API_KEY="${API_KEY:-}"
 EVAL_ID_INPUT="${EVAL_ID:-openpi_cube_001}"
 if [[ "${EVAL_ID_INPUT}" == eval_* ]]; then
@@ -55,6 +56,15 @@ IMAGE_WRITER_THREADS="${IMAGE_WRITER_THREADS:-6}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 LOG_POLICY_STEPS="${LOG_POLICY_STEPS:-false}"
 
+case "${CONTROL_MODE}" in
+  joint|ee_pose)
+    ;;
+  *)
+    echo "Invalid CONTROL_MODE=${CONTROL_MODE}; expected joint or ee_pose." >&2
+    exit 2
+    ;;
+esac
+
 usage() {
   cat <<EOF
 Usage:
@@ -67,12 +77,13 @@ Useful overrides:
   env EPISODE_TIME_S=45 RESET_BEFORE_EPISODE=false $0 hil
   env SKIP_CAMERA_RESTART=true $0 hil  # reuse already-running camera nodes
   env LOG_POLICY_STEPS=true $0 hil
+  env CONTROL_MODE=ee_pose JOINT_PORT=5352 EE_PORT=5353 $0 dry-run
   env SWAP_JOINT_ARMS=false $0 hil  # only if the remote server output order changes
   env SEND_ACTIONS=false $0 dry-run
   env POLICY_RELATIVE_LIMIT=true $0 hil   # re-enable robot max_relative_target clipping
 
 OpenPI defaults:
-  host=${HOST} joint_port=${JOINT_PORT}
+  host=${HOST} joint_port=${JOINT_PORT} ee_port=${EE_PORT} control_mode=${CONTROL_MODE}
   image preprocessing remains the current client resize_with_pad(${IMAGE_SIZE}, ${IMAGE_SIZE}) path.
   policy_relative_limit=${POLICY_RELATIVE_LIMIT}
 EOF
@@ -104,10 +115,18 @@ check_arm_topics() {
     /cobot_magic/puppet/joint_left
     /cobot_magic/puppet/joint_right
   )
-  local command_topics=(
-    /cobot_magic/command/joint_left
-    /cobot_magic/command/joint_right
-  )
+  local command_topics
+  if [[ "${CONTROL_MODE}" == "ee_pose" ]]; then
+    command_topics=(
+      /cobot_magic/command/ee_left
+      /cobot_magic/command/ee_right
+    )
+  else
+    command_topics=(
+      /cobot_magic/command/joint_left
+      /cobot_magic/command/joint_right
+    )
+  fi
 
   echo "Checking Cobot Magic arm JointState topics:"
   for topic in "${state_topics[@]}"; do
@@ -120,7 +139,7 @@ check_arm_topics() {
     fi
   done
 
-  echo "Checking Cobot Magic policy command subscribers:"
+  echo "Checking Cobot Magic ${CONTROL_MODE} policy command subscribers:"
   for topic in "${command_topics[@]}"; do
     printf "  %s ... " "${topic}"
     local info
@@ -139,7 +158,8 @@ check_arm_topics() {
 Arm ROS runtime is not ready for OpenPI control.
 
 Start or restart it in policy mode and keep that terminal open:
-  ${repo_root}/scripts/cobot_magic_restart_runtime.sh --mode policy
+  joint:   ${repo_root}/scripts/cobot_magic_restart_runtime.sh --mode policy
+  ee_pose: ${repo_root}/scripts/cobot_magic_policy.sh control_mode:=ee_pose start_client:=false send_actions:=false
 
 Then re-run:
   $0 check
@@ -161,6 +181,10 @@ check_cameras() {
 }
 
 check_openpi_server() {
+  local port="${JOINT_PORT}"
+  if [[ "${CONTROL_MODE}" == "ee_pose" ]]; then
+    port="${EE_PORT}"
+  fi
   python - <<PY
 import sys
 from pathlib import Path
@@ -169,9 +193,9 @@ repo = Path(${repo_root@Q})
 sys.path.insert(0, str(repo / "openpi" / "packages" / "openpi-client" / "src"))
 from openpi_client import websocket_client_policy
 
-uri = "ws://${HOST}:${JOINT_PORT}"
+uri = "ws://${HOST}:${port}"
 policy = websocket_client_policy.WebsocketClientPolicy(host=uri, port=None, api_key=${API_KEY@Q} or None)
-print(f"OpenPI joint server ok: {uri}, metadata={policy.get_server_metadata()}")
+print(f"OpenPI ${CONTROL_MODE} server ok: {uri}, metadata={policy.get_server_metadata()}")
 try:
     policy._ws.close()
 except Exception:
@@ -184,6 +208,7 @@ common_args() {
     --host="${HOST}"
     --joint-port="${JOINT_PORT}"
     --ee-port="${EE_PORT}"
+    --control-mode="${CONTROL_MODE}"
     --connect-timeout-s="${CONNECT_TIMEOUT_S}"
     --request-timeout-s="${REQUEST_TIMEOUT_S}"
     --fps="${FPS}"
@@ -250,7 +275,12 @@ run_hil() {
   check_cameras
   check_arm_topics
 
-  echo "OpenPI server: ${HOST}:${JOINT_PORT}"
+  if [[ "${CONTROL_MODE}" == "ee_pose" ]]; then
+    echo "OpenPI server: ${HOST}:${EE_PORT}"
+  else
+    echo "OpenPI server: ${HOST}:${JOINT_PORT}"
+  fi
+  echo "Control mode: ${CONTROL_MODE}"
   echo "Eval dataset: ${EVAL_DATASET_REPO_ID}"
   echo "Eval root: ${EVAL_DATASET_ROOT}"
   echo "Task: ${TASK_DESC}"
