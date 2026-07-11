@@ -137,12 +137,30 @@ check_arm_topics() {
     /cobot_magic/command/joint_left
     /cobot_magic/command/joint_right
   )
+  local manual_status_topics=(
+    /cobot_magic/leader/manual_control_status_left
+    /cobot_magic/leader/manual_control_status_right
+  )
 
   echo
   echo "Checking arm state topics:"
   for topic in "${state_topics[@]}"; do
     printf "  %s ... " "${topic}"
     if timeout 5s ros2 topic echo --once "${topic}" >/dev/null 2>&1; then
+      echo "ok"
+    else
+      echo "missing"
+      missing=1
+    fi
+  done
+
+  echo
+  echo "Checking leader manual-control status publishers:"
+  for topic in "${manual_status_topics[@]}"; do
+    printf "  %s ... " "${topic}"
+    local info
+    info="$(ros2 topic info "${topic}" 2>/dev/null || true)"
+    if grep -Eq "Publisher count: [1-9][0-9]*" <<<"${info}"; then
       echo "ok"
     else
       echo "missing"

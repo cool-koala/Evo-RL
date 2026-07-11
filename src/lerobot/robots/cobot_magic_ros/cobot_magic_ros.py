@@ -61,7 +61,12 @@ class CobotMagicRosFollower(Robot):
         self._right_state: Any | None = None
         self._left_ee_state: Any | None = None
         self._right_ee_state: Any | None = None
+        self._left_state_received_at: float | None = None
+        self._right_state_received_at: float | None = None
+        self._left_ee_state_received_at: float | None = None
+        self._right_ee_state_received_at: float | None = None
         self._images: dict[str, Any] = {}
+        self._image_received_at: dict[str, float] = {}
         self._subscribers: list[Any] = []
         self._left_command_publisher: Any | None = None
         self._right_command_publisher: Any | None = None
@@ -175,50 +180,157 @@ class CobotMagicRosFollower(Robot):
 
     def _left_state_callback(self, msg: Any) -> None:
         self._left_state = msg
+        self._left_state_received_at = time.monotonic()
 
     def _right_state_callback(self, msg: Any) -> None:
         self._right_state = msg
+        self._right_state_received_at = time.monotonic()
 
     def _left_ee_state_callback(self, msg: Any) -> None:
         self._left_ee_state = msg
+        self._left_ee_state_received_at = time.monotonic()
 
     def _right_ee_state_callback(self, msg: Any) -> None:
         self._right_ee_state = msg
+        self._right_ee_state_received_at = time.monotonic()
 
     def _image_callback(self, camera_name: str, msg: Any) -> None:
         self._images[camera_name] = msg
+        self._image_received_at[camera_name] = time.monotonic()
 
-    def _wait_for(self, predicate) -> None:
-        deadline = time.perf_counter() + self.config.read_timeout_s
+    def _wait_for(self, predicate, *, timeout_s: float | None = None) -> None:
+        wait_timeout_s = self.config.read_timeout_s if timeout_s is None else max(0.0, timeout_s)
+        deadline = time.perf_counter() + wait_timeout_s
         while not predicate():
-            if self.config.read_timeout_s == 0 or time.perf_counter() >= deadline:
+            if wait_timeout_s == 0 or time.perf_counter() >= deadline:
                 return
             if self._ros is not None:
                 spin_ros_once(self._ros, timeout_sec=0.0)
             time.sleep(self.config.poll_interval_s)
 
-    def _require_state(self, state: Any | None, topic: str, msg_type: str = "JointState") -> Any:
+    def _state_is_fresh(self, state: Any | None, received_at: float | None) -> bool:
+        if state is None:
+            return False
+        if self.config.state_timeout_s <= 0:
+            return True
+        if received_at is None:
+            return False
+        return max(0.0, time.monotonic() - received_at) <= self.config.state_timeout_s
+
+    def _require_state(
+        self,
+        state: Any | None,
+        received_at: float | None,
+        topic: str,
+        msg_type: str = "JointState",
+    ) -> Any:
         if state is None:
             raise RuntimeError(f"No Cobot Magic ROS {msg_type} has been received from {topic!r}.")
+        if self.config.state_timeout_s > 0:
+            if received_at is None:
+                raise RuntimeError(f"Cobot Magic ROS {msg_type} from {topic!r} has no receive timestamp.")
+            age_s = max(0.0, time.monotonic() - received_at)
+            if age_s > self.config.state_timeout_s:
+                raise RuntimeError(
+                    f"Stale Cobot Magic ROS {msg_type} from {topic!r}: "
+                    f"age={age_s:.3f}s timeout={self.config.state_timeout_s:.3f}s."
+                )
         return state
+
+    def _assert_control_states_fresh(self) -> None:
+        if self.config.state_timeout_s <= 0:
+            return
+        self._require_state(
+            self._left_state,
+            self._left_state_received_at,
+            self.config.left_state_topic,
+        )
+        self._require_state(
+            self._right_state,
+            self._right_state_received_at,
+            self.config.right_state_topic,
+        )
+        self._require_state(
+            self._left_ee_state,
+            self._left_ee_state_received_at,
+            self.config.left_ee_state_topic,
+            "PoseStamped",
+        )
+        self._require_state(
+            self._right_ee_state,
+            self._right_ee_state_received_at,
+            self.config.right_ee_state_topic,
+            "PoseStamped",
+        )
+
+    def _assert_image_fresh(self, camera_name: str) -> None:
+        if self.config.image_timeout_s <= 0:
+            return
+        received_at = self._image_received_at.get(camera_name)
+        topic = self.config.cameras[camera_name].topic
+        if received_at is None:
+            raise RuntimeError(f"Cobot Magic ROS image from {topic!r} has no receive timestamp.")
+        age_s = max(0.0, time.monotonic() - received_at)
+        if age_s > self.config.image_timeout_s:
+            raise RuntimeError(
+                f"Stale Cobot Magic ROS image from {topic!r}: "
+                f"age={age_s:.3f}s timeout={self.config.image_timeout_s:.3f}s."
+            )
+
+    def _image_is_fresh(self, camera_name: str) -> bool:
+        if camera_name not in self._images:
+            return False
+        if self.config.image_timeout_s <= 0:
+            return True
+        received_at = self._image_received_at.get(camera_name)
+        if received_at is None:
+            return False
+        return max(0.0, time.monotonic() - received_at) <= self.config.image_timeout_s
 
     @check_if_not_connected
     def get_joint_observation(self) -> RobotObservation:
-        self._wait_for(
-            lambda: (
-                self._left_state is not None
-                and self._right_state is not None
-                and self._left_ee_state is not None
-                and self._right_ee_state is not None
+        states_present = all(
+            state is not None
+            for state in (
+                self._left_state,
+                self._right_state,
+                self._left_ee_state,
+                self._right_ee_state,
             )
         )
-        left_state = self._require_state(self._left_state, self.config.left_state_topic)
-        right_state = self._require_state(self._right_state, self.config.right_state_topic)
+        wait_timeout_s = self.config.read_timeout_s
+        if states_present and self.config.state_timeout_s > 0:
+            wait_timeout_s = min(wait_timeout_s, self.config.state_timeout_s)
+        self._wait_for(
+            lambda: (
+                self._state_is_fresh(self._left_state, self._left_state_received_at)
+                and self._state_is_fresh(self._right_state, self._right_state_received_at)
+                and self._state_is_fresh(self._left_ee_state, self._left_ee_state_received_at)
+                and self._state_is_fresh(self._right_ee_state, self._right_ee_state_received_at)
+            ),
+            timeout_s=wait_timeout_s,
+        )
+        left_state = self._require_state(
+            self._left_state,
+            self._left_state_received_at,
+            self.config.left_state_topic,
+        )
+        right_state = self._require_state(
+            self._right_state,
+            self._right_state_received_at,
+            self.config.right_state_topic,
+        )
         left_ee_state = self._require_state(
-            self._left_ee_state, self.config.left_ee_state_topic, "PoseStamped"
+            self._left_ee_state,
+            self._left_ee_state_received_at,
+            self.config.left_ee_state_topic,
+            "PoseStamped",
         )
         right_ee_state = self._require_state(
-            self._right_ee_state, self.config.right_ee_state_topic, "PoseStamped"
+            self._right_ee_state,
+            self._right_ee_state_received_at,
+            self.config.right_ee_state_topic,
+            "PoseStamped",
         )
         return {
             **joint_state_to_observation(left_state, "left"),
@@ -232,7 +344,13 @@ class CobotMagicRosFollower(Robot):
         obs = self.get_joint_observation()
 
         for camera_name in self.config.cameras:
-            self._wait_for(lambda camera_name=camera_name: camera_name in self._images)
+            wait_timeout_s = self.config.read_timeout_s
+            if camera_name in self._images and self.config.image_timeout_s > 0:
+                wait_timeout_s = min(wait_timeout_s, self.config.image_timeout_s)
+            self._wait_for(
+                lambda camera_name=camera_name: self._image_is_fresh(camera_name),
+                timeout_s=wait_timeout_s,
+            )
             image_msg = self._images.get(camera_name)
             if image_msg is None:
                 topic = self.config.cameras[camera_name].topic
@@ -241,6 +359,7 @@ class CobotMagicRosFollower(Robot):
                     "Start the camera ROS nodes first, for example "
                     "`third_party/cobot_magic_ros_runtime/tools/cameras.sh`."
                 )
+            self._assert_image_fresh(camera_name)
             obs[camera_name] = ros_image_to_numpy(image_msg)
         return obs
 
@@ -258,6 +377,7 @@ class CobotMagicRosFollower(Robot):
         if self._ros is None:
             raise RuntimeError("Cobot Magic ROS follower is not connected.")
         spin_ros_once(self._ros, timeout_sec=0.0)
+        self._assert_control_states_fresh()
         if self.config.control_mode == "ee_pose":
             return self._send_ee_action(action)
         return self._send_joint_action(action)
@@ -342,5 +462,15 @@ class CobotMagicRosFollower(Robot):
             self._right_command_publisher = None
             self._left_ee_command_publisher = None
             self._right_ee_command_publisher = None
+            self._left_state = None
+            self._right_state = None
+            self._left_ee_state = None
+            self._right_ee_state = None
+            self._left_state_received_at = None
+            self._right_state_received_at = None
+            self._left_ee_state_received_at = None
+            self._right_ee_state_received_at = None
+            self._images = {}
+            self._image_received_at = {}
             self._is_connected = False
             logger.info("%s disconnected.", self)

@@ -34,6 +34,8 @@ class CobotMagicRosLeaderConfig(TeleoperatorConfig):
     right_leader_command_topic: str = "/cobot_magic/leader/command_joint_right"
     left_leader_manual_control_topic: str = "/cobot_magic/leader/manual_control_left"
     right_leader_manual_control_topic: str = "/cobot_magic/leader/manual_control_right"
+    left_leader_manual_control_status_topic: str = "/cobot_magic/leader/manual_control_status_left"
+    right_leader_manual_control_status_topic: str = "/cobot_magic/leader/manual_control_status_right"
     left_follower_state_topic: str = "/cobot_magic/puppet/joint_left"
     right_follower_state_topic: str = "/cobot_magic/puppet/joint_right"
     sync_gripper: bool = True
@@ -48,6 +50,7 @@ class CobotMagicRosLeaderConfig(TeleoperatorConfig):
     publisher_queue_size: int = 10
     read_timeout_s: float = 1.0
     poll_interval_s: float = 0.01
+    state_timeout_s: float = 0.5
 
     def __post_init__(self):
         if self.left_leader_state_topic == self.right_leader_state_topic:
@@ -59,8 +62,10 @@ class CobotMagicRosLeaderConfig(TeleoperatorConfig):
         if self.left_leader_command_topic == self.right_leader_command_topic:
             raise ValueError("Cobot Magic ROS left and right leader command topics must be different.")
         if self.left_leader_manual_control_topic == self.right_leader_manual_control_topic:
+            raise ValueError("Cobot Magic ROS left and right leader manual-control topics must be different.")
+        if self.left_leader_manual_control_status_topic == self.right_leader_manual_control_status_topic:
             raise ValueError(
-                "Cobot Magic ROS left and right leader manual-control topics must be different."
+                "Cobot Magic ROS left and right leader manual-control status topics must be different."
             )
         if self.relative_takeover and self.left_follower_state_topic == self.right_follower_state_topic:
             raise ValueError("Cobot Magic ROS left and right follower topics must be different.")
@@ -68,6 +73,8 @@ class CobotMagicRosLeaderConfig(TeleoperatorConfig):
             raise ValueError("`read_timeout_s` must be >= 0.")
         if self.poll_interval_s <= 0:
             raise ValueError("`poll_interval_s` must be > 0.")
+        if self.state_timeout_s < 0:
+            raise ValueError("`state_timeout_s` must be >= 0.")
         if self.startup_sync_duration_s <= 0:
             raise ValueError("`startup_sync_duration_s` must be > 0.")
         if self.startup_sync_max_joint_delta is not None and self.startup_sync_max_joint_delta <= 0:

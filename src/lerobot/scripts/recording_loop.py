@@ -77,6 +77,28 @@ def _send_manual_or_interpolated_action(robot: Robot, action: RobotAction) -> Ro
     return send_action(action)
 
 
+def _set_teleop_manual_control(teleop: Any | None, enabled: bool) -> None:
+    if teleop is None:
+        return
+    set_manual_control = getattr(teleop, "set_manual_control", None)
+    if not callable(set_manual_control):
+        return
+    try:
+        set_manual_control(enabled)
+    except Exception:
+        logging.exception("Failed to switch teleop manual-control mode to %s", enabled)
+        raise
+
+
+def _park_teleop_at_current_pose(teleop: Teleoperator) -> None:
+    if not hasattr(teleop, "send_feedback") or not hasattr(teleop, "get_absolute_action"):
+        raise RuntimeError("Parked HIL release requires positional teleop feedback support.")
+    # Cobot ROS handles this command atomically: the callback installs the
+    # current target while leaving manual mode, then send_feedback waits for
+    # both arm ACKs before returning.
+    teleop.send_feedback(teleop.get_absolute_action())
+
+
 def _move_teleop_to_action_while_holding_robot(
     *,
     teleop: Teleoperator,
@@ -235,19 +257,9 @@ def record_loop(
     elif isinstance(teleop, list):
         teleop_arm_for_mode_switch = teleop_arm
 
-    def set_teleop_manual_control(enabled: bool) -> None:
-        if teleop_arm_for_mode_switch is None:
-            return
-        if not hasattr(teleop_arm_for_mode_switch, "set_manual_control"):
-            return
-        try:
-            teleop_arm_for_mode_switch.set_manual_control(enabled)
-        except Exception:
-            logging.exception("Failed to switch teleop manual-control mode to %s", enabled)
-
     if policy is None:
         # During reset/teleop-only loops keep leader backdrivable for manual dragging.
-        set_teleop_manual_control(True)
+        _set_teleop_manual_control(teleop_arm_for_mode_switch, True)
 
     # Reset policy and processor if they are provided
     if policy is not None and preprocessor is not None and postprocessor is not None:
@@ -263,7 +275,7 @@ def record_loop(
 
     if intervention_enabled:
         # Start in S0: policy drives both arms, teleop arm should accept feedback commands.
-        set_teleop_manual_control(False)
+        _set_teleop_manual_control(teleop_arm_for_mode_switch, False)
 
     parked_hil_enabled = (
         intervention_enabled
@@ -356,7 +368,7 @@ def record_loop(
                             duration_s=hil_leader_sync_duration_s,
                             fps=fps,
                         )
-                        set_teleop_manual_control(True)
+                        _set_teleop_manual_control(teleop_arm_for_mode_switch, True)
                         intervention_state = INTERVENTION_STATE_ACTIVE
                         start_episode_t += time.perf_counter() - transition_start_t
                         logging.info(
@@ -364,8 +376,8 @@ def record_loop(
                         )
                         continue
                     else:
+                        _set_teleop_manual_control(teleop_arm_for_mode_switch, True)
                         intervention_state = INTERVENTION_STATE_ACTIVE
-                        set_teleop_manual_control(True)
                         logging.info(
                             "Intervention enabled (S1): teleop actions now override policy execution."
                         )
@@ -375,7 +387,7 @@ def record_loop(
                             raise RuntimeError("Parked HIL release requires a leader home action.")
                         transition_start_t = time.perf_counter()
                         hold_action = _make_hold_action(robot)
-                        set_teleop_manual_control(False)
+                        _park_teleop_at_current_pose(teleop)
                         intervention_state = INTERVENTION_STATE_RELEASE
                         logging.info(
                             "Parked HIL release requested: holding follower and returning leader over %.2fs.",
@@ -395,8 +407,8 @@ def record_loop(
                         logging.info("Intervention released (S0): returning control to policy.")
                         continue
                     else:
+                        _set_teleop_manual_control(teleop_arm_for_mode_switch, False)
                         intervention_state = INTERVENTION_STATE_RELEASE
-                        set_teleop_manual_control(False)
                         reset_policy_and_processors()
                         logging.info("Intervention release requested (S2): returning control to policy.")
             else:

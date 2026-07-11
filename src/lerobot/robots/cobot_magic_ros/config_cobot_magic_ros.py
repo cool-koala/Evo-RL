@@ -61,6 +61,8 @@ class CobotMagicRosFollowerConfig(RobotConfig):
     publisher_queue_size: int = 10
     read_timeout_s: float = 5.0
     poll_interval_s: float = 0.01
+    state_timeout_s: float = 0.5
+    image_timeout_s: float = 1.0
     left_arm_enabled: bool = True
     right_arm_enabled: bool = True
     ee_command_timeout_s: float = 0.25
@@ -86,6 +88,10 @@ class CobotMagicRosFollowerConfig(RobotConfig):
             raise ValueError("`read_timeout_s` must be >= 0.")
         if self.poll_interval_s <= 0:
             raise ValueError("`poll_interval_s` must be > 0.")
+        if self.state_timeout_s < 0:
+            raise ValueError("`state_timeout_s` must be >= 0.")
+        if self.image_timeout_s < 0:
+            raise ValueError("`image_timeout_s` must be >= 0.")
         if self.ee_command_timeout_s <= 0:
             raise ValueError("`ee_command_timeout_s` must be > 0.")
         if self.ee_max_xyz_step_m < 0 or self.ee_max_rot_step < 0 or self.ee_max_gripper_step < 0:

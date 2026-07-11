@@ -111,6 +111,7 @@ def test_follower_ee_mode_publishes_ee_topics_only():
         control_mode="ee_pose",
         send_actions=True,
         cameras={},
+        state_timeout_s=0.0,
     )
     robot = CobotMagicRosFollower(cfg)
     robot._ros = _fake_ros()
@@ -121,10 +122,7 @@ def test_follower_ee_mode_publishes_ee_topics_only():
     action = {
         **{f"left_ee.{key}": float(idx) for idx, key in enumerate(("x", "y", "z", "wx", "wy", "wz"))},
         "left_ee.gripper_pos": 6.0,
-        **{
-            f"right_ee.{key}": float(idx + 10)
-            for idx, key in enumerate(("x", "y", "z", "wx", "wy", "wz"))
-        },
+        **{f"right_ee.{key}": float(idx + 10) for idx, key in enumerate(("x", "y", "z", "wx", "wy", "wz"))},
         "right_ee.gripper_pos": 16.0,
     }
 
@@ -136,3 +134,85 @@ def test_follower_ee_mode_publishes_ee_topics_only():
     assert robot._right_ee_command_publisher.messages[0].position[-1] == pytest.approx(16.0)
     assert sent["left_ee.x"] == pytest.approx(0.0)
     assert sent["right_ee.gripper_pos"] == pytest.approx(16.0)
+
+
+def test_follower_rejects_stale_control_state(monkeypatch):
+    import lerobot.robots.cobot_magic_ros.cobot_magic_ros as follower_module
+
+    robot = CobotMagicRosFollower(CobotMagicRosFollowerConfig(id="test", cameras={}))
+    robot._left_state = object()
+    robot._right_state = object()
+    robot._left_ee_state = object()
+    robot._right_ee_state = object()
+    robot._left_state_received_at = 10.0
+    robot._right_state_received_at = 9.0
+    robot._left_ee_state_received_at = 10.0
+    robot._right_ee_state_received_at = 10.0
+    monkeypatch.setattr(follower_module.time, "monotonic", lambda: 10.0)
+
+    with pytest.raises(RuntimeError, match=r"Stale.*joint_right.*age=1.000s"):
+        robot._assert_control_states_fresh()
+
+
+def test_follower_wait_can_refresh_stale_cached_state(monkeypatch):
+    import lerobot.robots.cobot_magic_ros.cobot_magic_ros as follower_module
+
+    robot = CobotMagicRosFollower(CobotMagicRosFollowerConfig(id="test", cameras={}))
+    robot._ros = object()
+    robot._left_state = object()
+    robot._left_state_received_at = 1.0
+    spin_calls = []
+    monkeypatch.setattr(follower_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(follower_module.time, "sleep", lambda _seconds: None)
+
+    def spin(_ros, *, timeout_sec):
+        spin_calls.append(timeout_sec)
+        robot._left_state_received_at = 10.0
+
+    monkeypatch.setattr(follower_module, "spin_ros_once", spin)
+
+    robot._wait_for(
+        lambda: robot._state_is_fresh(robot._left_state, robot._left_state_received_at),
+        timeout_s=robot.config.state_timeout_s,
+    )
+
+    assert spin_calls == [0.0]
+
+
+def test_follower_rejects_frozen_camera(monkeypatch):
+    import lerobot.robots.cobot_magic_ros.cobot_magic_ros as follower_module
+
+    cfg = CobotMagicRosFollowerConfig(id="test")
+    robot = CobotMagicRosFollower(cfg)
+    robot._image_received_at["cam_high"] = 8.0
+    monkeypatch.setattr(follower_module.time, "monotonic", lambda: 10.0)
+
+    with pytest.raises(RuntimeError, match=r"Stale.*camera_f.*age=2.000s"):
+        robot._assert_image_fresh("cam_high")
+
+
+def test_follower_disconnect_clears_cached_ros_messages():
+    robot = CobotMagicRosFollower(CobotMagicRosFollowerConfig(id="disconnect-test", cameras={}))
+    robot._left_state = object()
+    robot._right_state = object()
+    robot._left_ee_state = object()
+    robot._right_ee_state = object()
+    robot._left_state_received_at = 1.0
+    robot._right_state_received_at = 1.0
+    robot._left_ee_state_received_at = 1.0
+    robot._right_ee_state_received_at = 1.0
+    robot._images = {"cam": object()}
+    robot._image_received_at = {"cam": 1.0}
+
+    robot.disconnect()
+
+    assert robot._left_state is None
+    assert robot._right_state is None
+    assert robot._left_ee_state is None
+    assert robot._right_ee_state is None
+    assert robot._left_state_received_at is None
+    assert robot._right_state_received_at is None
+    assert robot._left_ee_state_received_at is None
+    assert robot._right_ee_state_received_at is None
+    assert robot._images == {}
+    assert robot._image_received_at == {}

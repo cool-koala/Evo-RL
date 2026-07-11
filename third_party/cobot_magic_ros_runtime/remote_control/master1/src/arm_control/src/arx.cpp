@@ -50,6 +50,7 @@ int main(int argc, char **argv)
     std::string end_topic;
     std::string command_topic;
     std::string manual_control_topic;
+    std::string manual_control_status_topic;
     node.param<std::string>("joint_topic", joint_topic, "/cobot_magic/leader/joint_right");
     node.param<std::string>("end_topic", end_topic, "/cobot_magic/leader/end_right");
     node.param<std::string>("command_topic", command_topic, "/cobot_magic/leader/command_joint_right");
@@ -57,9 +58,35 @@ int main(int argc, char **argv)
         "manual_control_topic",
         manual_control_topic,
         "/cobot_magic/leader/manual_control_right");
+    node.param<std::string>(
+        "manual_control_status_topic",
+        manual_control_status_topic,
+        "/cobot_magic/leader/manual_control_status_right");
+    ros::Publisher pub_manual_control_status =
+        node.advertise<std_msgs::Bool>(manual_control_status_topic, 10);
 
-    auto set_manual_control = [&ARX_ARM](bool enabled)
+    auto publish_manual_control_status = [&pub_manual_control_status](bool enabled)
     {
+        std_msgs::Bool status_msg;
+        status_msg.data = enabled;
+        pub_manual_control_status.publish(status_msg);
+    };
+
+    bool manual_control_state_initialized = false;
+    bool manual_control_enabled = false;
+    auto set_manual_control = [
+        &ARX_ARM,
+        &manual_control_state_initialized,
+        &manual_control_enabled,
+        &publish_manual_control_status](bool enabled)
+    {
+        if (manual_control_state_initialized && manual_control_enabled == enabled)
+        {
+            publish_manual_control_status(enabled);
+            return;
+        }
+        manual_control_state_initialized = true;
+        manual_control_enabled = enabled;
         if (enabled)
         {
             ARX_ARM.manual_control_requested = true;
@@ -92,6 +119,7 @@ int main(int argc, char **argv)
             }
             ROS_INFO("Cobot Magic leader right switched to ROS joint-command mode.");
         }
+        publish_manual_control_status(enabled);
     };
 
     ros::Subscriber sub_manual_control = node.subscribe<std_msgs::Bool>(
@@ -105,17 +133,21 @@ int main(int argc, char **argv)
     ros::Subscriber sub_joint = node.subscribe<sensor_msgs::JointState>(
         command_topic,
         10,
-        [&ARX_ARM](const sensor_msgs::JointState::ConstSharedPtr& msg)
+        [&ARX_ARM, &manual_control_state_initialized, &manual_control_enabled, &publish_manual_control_status](
+            const sensor_msgs::JointState::ConstSharedPtr& msg)
         {
             if (msg->position.size() < 7)
             {
                 ROS_WARN("Ignoring leader right JointState command with fewer than 7 positions.");
                 return;
             }
+            manual_control_state_initialized = true;
+            manual_control_enabled = false;
             ARX_ARM.manual_control_requested = false;
             ARX_ARM.control_mode = 2;
             ARX_ARM.is_teach_mode = false;
             ARX_ARM.is_torque_control = false;
+            ARX_ARM.teach2pos_returning = false;
             for (int i = 0; i < 7; i++)
             {
                 ARX_ARM.ros_control_pos_t[i] = msg->position[i];
@@ -128,6 +160,7 @@ int main(int argc, char **argv)
                     ARX_ARM.ros_control_vel[i] = 0.0;
                 }
             }
+            publish_manual_control_status(false);
         });
 
     ros::Publisher pub_joint01 = node.advertise<sensor_msgs::JointState>(joint_topic, 10);
