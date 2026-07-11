@@ -37,6 +37,14 @@ cd /home/guoxiaoyu/Evo-RL
 
 这个终端需要保持打开。脚本会启动/检查机械臂和相机。
 
+从不带双臂模式回执的旧 runtime 升级时，先编译一次再启动：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+third_party/cobot_magic_ros_runtime/remote_control/tools/build.sh
+./scripts/cobot_magic_restart_runtime.sh --mode policy
+```
+
 如果要评测 EE pose policy，不启动旧 C++ follower，从本仓库启动 ARX5 Cartesian bridge：
 
 ```bash
@@ -77,6 +85,14 @@ cd /home/guoxiaoyu/Evo-RL
 - 当前控制模式对应的 command topic 是否有 subscriber：joint 为
   `/cobot_magic/command/joint_left|right`，EE 为 `/cobot_magic/command/ee_left|right`
 
+Joint HIL 还需要额外确认 `/cobot_magic/leader/manual_control_status_left|right` 各有一个 publisher。
+`cobot_magic_restart_runtime.sh` 会自动检查；手动检查可执行：
+
+```bash
+ros2 topic info /cobot_magic/leader/manual_control_status_left
+ros2 topic info /cobot_magic/leader/manual_control_status_right
+```
+
 如果相机已经在运行，并且不希望脚本重启相机：
 
 ```bash
@@ -108,6 +124,14 @@ f: failure
 i: intervention toggle
 Esc: stop early
 ```
+
+`i` 的用法没有变化：按一次进入接管，再按一次退出，不要长按。进入时 client 会先等待新鲜的左右
+主臂、从臂 joint/EE 状态，然后等待两侧主臂都确认重力补偿模式；任一侧超时都会取消接管。退出时
+先用当前主臂位置原子切回位置控制，再返回 policy。若日志出现 `manual-control mode was not
+acknowledged` 或 `Stale Cobot Magic ROS`，应停止本轮评测、检查 runtime/topic，不能继续反复按键。
+
+默认安全超时为主臂/从臂状态 `0.5s`、相机 `1.0s`。设置为 `0` 可以关闭检查，但不应用于真机评测。
+进程正常退出或异常退出都会尝试关闭人工模式；仍应保持急停可用，并在空载状态先重复验证进入/退出。
 
 如果只是检查远程推理和本地观测，不发送动作：
 

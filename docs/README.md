@@ -21,8 +21,18 @@ cd /home/guoxiaoyu/Evo-RL
 - 自动启动 CAN 和四条机械臂 ROS2 节点。
 - 自动检查四个 arm state topic。
 - 自动检查 `/cobot_magic/command/joint_left|right` 有 subscriber。
+- 自动检查左右主臂 `manual_control_status` publisher 存在。
 
 这个终端要保持打开。按 `Ctrl-C` 会停止 arm runtime。
+
+从旧版本升级后第一次使用，需要先重新编译 runtime：
+
+```bash
+cd /home/guoxiaoyu/Evo-RL
+third_party/cobot_magic_ros_runtime/remote_control/tools/build.sh
+```
+
+只改 Python 参数或文档时不需要重复编译；更新 `master1/master2` 的 C++ 控制代码后必须重新编译。
 
 ## 2. 只停止所有硬件 runtime
 
@@ -147,6 +157,26 @@ policy/HIL/OpenPI 模式还要检查 command subscriber：
 ros2 topic info /cobot_magic/command/joint_left
 ros2 topic info /cobot_magic/command/joint_right
 ```
+
+HIL 还必须有左右主臂模式回执 publisher：
+
+```bash
+ros2 topic info /cobot_magic/leader/manual_control_status_left
+ros2 topic info /cobot_magic/leader/manual_control_status_right
+```
+
+两条命令都应显示 `Publisher count: 1`。进入或退出接管时，可以另开终端观察实际回执：
+
+```bash
+# 终端 A
+ros2 topic echo /cobot_magic/leader/manual_control_status_left
+
+# 终端 B
+ros2 topic echo /cobot_magic/leader/manual_control_status_right
+```
+
+不要在 client 尚未发出切换请求时用 `--once` 等待回执；该状态在模式命令到达时发布，不是固定频率
+心跳。
 
 ## 7. CAN 映射
 
@@ -308,6 +338,12 @@ python scripts/openpi_cobot_magic_hil.py \
 每步 14 维 joint action。客户端按控制频率每个循环执行 chunk 里的下一个 action。为了减少
 chunk 边界卡顿，`--prefetch-remaining-steps 8` 会在当前 chunk 还剩 8 步时后台请求下一包。
 
+人工接管键仍为 `i`：按一次进入，再按一次退出。切换现在必须收到左右主臂一致回执，失败会直接
+报错并执行安全清理，不会继续推进 HIL 状态机。退出时主臂先锁定当前位置，再恢复 policy；不要在
+模式切换期间重复按 `i` 或同时执行 `cobot_magic_reset_pose.sh`。ROS joint/EE 状态默认超过 `0.5s`
+未更新即拒绝控制，相机超过 `1.0s` 未更新即拒绝使用旧帧。使用 parked HIL recording 状态机时，
+退出后才会按其 return-duration 配置缓慢返回主臂初始位。
+
 如果上一次失败已经留下了 `data/openpi_cobot_magic_hil/lerobot/meta/info.json`，继续用同一个
 `--dataset-root` 时要保留上面的 `--force-overwrite`，或者换一个新的 `--repo-id` 和
 `--dataset-root`。
@@ -415,6 +451,19 @@ command topic 没有 subscriber：
 cd /home/guoxiaoyu/Evo-RL
 ./scripts/cobot_magic_restart_runtime.sh --mode policy
 ```
+
+按 `i` 后提示双臂模式未确认，或只有一侧主臂进入重力补偿：
+
+```bash
+ros2 topic info /cobot_magic/leader/manual_control_status_left
+ros2 topic info /cobot_magic/leader/manual_control_status_right
+cd /home/guoxiaoyu/Evo-RL
+./scripts/cobot_magic_restart_runtime.sh --mode policy
+```
+
+不要绕过回执检查继续操作。若刚更新过 C++ runtime，先执行本页第 1 节的 `tools/build.sh`，再重启。
+出现 `Stale Cobot Magic ROS ...` 表示对应 joint、EE 或相机 topic 已停止更新，应先恢复 topic，不能把
+超时参数调大后继续真机操作。
 
 普通主从不跟随：
 
